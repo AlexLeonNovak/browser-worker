@@ -9,9 +9,3 @@ services:
       - PORT=${PORT:-3001}
       - BROWSERLESS_URL=${BROWSERLESS_URL:-ws://browserless:3000}
       - BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN:-secret}
-    networks:
-      - browser-worker
-
-networks:
-  browser-worker:
-    driver: bridge
