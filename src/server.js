@@ -17,7 +17,6 @@ function getBrowserlessWsUrl(options = {}) {
   
   const { blockAds = false, stealth = true, disableSecurity = false, ttl = 30000 } = options;
   
-  // Use ttl as the timeout for Browserless session
   url.searchParams.set('timeout', ttl.toString());
   url.searchParams.set('blockAds', blockAds.toString());
   
@@ -45,7 +44,6 @@ function getBrowserlessWsUrl(options = {}) {
   return url.toString();
 }
 
-// session id -> { sessionId, browser, context, page, ttl, timer }
 const sessions = new Map();
 
 /**
@@ -131,26 +129,72 @@ async function executeStep(session, step) {
     case 'goto':
       await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 60000 });
       return { url: page.url() };
+    case 'reload':
+      await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
+      return { url: page.url() };
+    case 'getUrl':
+      return { url: page.url() };
     case 'getContent':
       return { html: await page.content() };
-    case 'screenshot':
-      const buf = await page.screenshot({ fullPage: params.fullPage ?? false });
-      return { screenshot: buf.toString('base64') };
     case 'click':
-      await page.click(params.selector, { timeout: params.timeout ?? 30000 });
+      await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
       return { clicked: params.selector };
     case 'fill':
       await page.fill(params.selector, params.value);
       return { filled: params.selector };
+    case 'type':
+      await page.type(params.selector, params.text, { delay: params.delay ?? 30 });
+      return { typed: params.selector };
+    case 'select':
+      await page.selectOption(params.selector, params.value);
+      return { selected: params.value };
+    case 'check':
+      params.state === false ? await page.uncheck(params.selector) : await page.check(params.selector);
+      return { checked: params.selector };
+    case 'keyboard':
+      await page.keyboard.press(params.key);
+      return { pressed: params.key };
+    case 'hover':
+      await page.hover(params.selector);
+      return { hovered: params.selector };
     case 'wait':
       await page.waitForTimeout(params.ms ?? 1000);
       return { waited: params.ms };
+    case 'waitForSelector':
+      await page.waitForSelector(params.selector, { 
+        state: params.state ?? 'visible', 
+        timeout: params.timeout ?? 30_000 
+      });
+      return { found: params.selector };
+    case 'waitForNavigation':
+      await page.waitForLoadState(params.waitUntil ?? 'networkidle');
+      return { url: page.url() };
     case 'evaluate':
       return { value: await page.evaluate(params.script) };
+    case 'getText':
+      return { text: await page.textContent(params.selector) };
+    case 'getAttribute':
+      return { value: await page.getAttribute(params.selector, params.attr) };
+    case 'screenshot': {
+      const opts = { type: 'png', fullPage: params.fullPage ?? false };
+      const buf = params.selector
+        ? await page.locator(params.selector).screenshot(opts)
+        : await page.screenshot(opts);
+      return { screenshot: buf.toString('base64') };
+    }
     case 'getCookies':
       return { cookies: await context.cookies() };
+    case 'setCookies':
+      await context.addCookies(params.cookies);
+      return { set: params.cookies.length };
+    case 'getLocalStorage':
+      return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
     default:
-      if (typeof page[action] === 'function') return await page[action](params);
+      // Last resort fallback to page method
+      if (typeof page[action] === 'function') {
+        const result = await page[action](params);
+        return { result };
+      }
       throw new Error(`Unknown action: "${action}"`);
   }
 }

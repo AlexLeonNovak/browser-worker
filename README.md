@@ -1,6 +1,9 @@
 # browser-worker
 
-Stateful browser worker for n8n and other automation tools.
+Stateful browser worker for automation tools like n8n.
+---
+**Worker runs in Node.js** — exposes a REST API for browser automation.
+
 **Browser runs in Browserless** — worker is a thin HTTP↔CDP client.
 
 ## Architecture
@@ -96,7 +99,10 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `getLocalStorage` | `{ key }` | `{ value }` |
 
 ### GET /sessions
-List active sessions and their current URLs.
+List all active sessions with their current URLs and TTLs.
+
+### GET /sessions/:id
+Get detailed state of a specific session (URL, TTL, status).
 
 ### DELETE /sessions/:id
 Close a specific session and release its browser resources.
@@ -106,11 +112,11 @@ Basic health check showing the number of active sessions.
 
 ## Features
 
-- **Stateful Sessions**: Keep the browser open between requests using `sessionId`.
-- **Universal Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, CSP, and web security.
-- **Protocol Downgrade**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
-- **Stealth Mode**: Built-in evasion techniques to avoid being flagged as a bot.
-- **Dynamic TTL**: Control session duration per request.
+- **Stateful Sessions**: Maintain browser state (cookies, local storage, auth) between multiple requests using `sessionId`.
+- **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
+- **HTTP Enforcement**: Use `forceHttp: true` to stay on HTTP even if the server tries to redirect to HTTPS.
+- **Stealth mode**: Integrated evasion techniques to bypass bot detection.
+- **Dynamic Session Management**: Control session lifetime via `ttl` per request.
 
 ## Environment Variables
 
