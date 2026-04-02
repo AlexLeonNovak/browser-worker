@@ -47,6 +47,7 @@ async function createSession(ttl = 300_000, stealth = true) {
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
+    screen: { width: 1920, height: 1080 },
     locale: 'en-US',
   });
 
@@ -73,16 +74,19 @@ async function createSession(ttl = 300_000, stealth = true) {
   // await page.setViewportSize({ width: 1920, height: 1080 });
   const sessionId = randomUUID();
 
-  sessions.set(sessionId, { browser, context, page, ttl });
+  const sessionObj = { sessionId, browser, context, page, ttl };
+  sessions.set(sessionId, sessionObj);
   resetTimer(sessionId, ttl);
 
   console.log(`[session:${sessionId}] created via Browserless (ttl=${ttl}ms). Active: ${sessions.size}`);
-  return { sessionId, browser, context, page, ttl };
+  return sessionObj;
 }
 
 async function executeStep(session, step) {
   const { action, params = {} } = step;
-  const { page, context } = session;
+  const { page, context, sessionId } = session;
+
+  console.log(`[session:${sessionId}] step: ${action}`, params);
 
   switch (action) {
     case 'goto':
@@ -157,6 +161,9 @@ async function executeStep(session, step) {
 
 async function executeSteps(session, steps, stopOnError = true) {
   const results = [];
+  const { sessionId } = session;
+
+  console.log(`[session:${sessionId}] executing ${steps.length} steps (stopOnError=${stopOnError})`);
   
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -168,17 +175,20 @@ async function executeSteps(session, steps, stopOnError = true) {
         result,
       });
     } catch (err) {
+      console.error(`[session:${sessionId}] step ${i} (${step.action}) failed: ${err.message}`);
       results.push({
         action: step.action,
         ok: false,
         error: err.message,
       });
       if (stopOnError) {
+        console.warn(`[session:${sessionId}] stopping on error`);
         return { completed: i, results, error: err.message };
       }
     }
   }
   
+  console.log(`[session:${sessionId}] completed ${steps.length} steps`);
   return { completed: steps.length, results, error: null };
 }
 
@@ -186,7 +196,10 @@ async function executeSteps(session, steps, stopOnError = true) {
 app.post('/execute', async (req, res) => {
   const { sessionId, ttl = 300_000, stealth = true, steps = [], stopOnError = true } = req.body;
 
+  console.log(`[POST /execute] request from user (sessionId=${sessionId || 'new'}, steps=${steps.length})`);
+
   if (!steps.length) {
+    console.error(`[POST /execute] error: steps array is empty`);
     return res.status(400).json({ ok: false, error: 'steps array is required' });
   }
 
@@ -197,6 +210,7 @@ app.post('/execute', async (req, res) => {
   if (sessionId) {
     session = sessions.get(sessionId);
     if (!session) {
+      console.warn(`[POST /execute] session ${sessionId} not found`);
       return res.status(404).json({
         ok: false,
         error: 'Session not found or expired',
@@ -211,6 +225,7 @@ app.post('/execute', async (req, res) => {
       session = await createSession(ttl, stealth);
       created = true;
     } catch (err) {
+      console.error(`[POST /execute] cannot create session: ${err.message}`);
       return res.status(503).json({
         ok: false,
         error: `Cannot connect to Browserless: ${err.message}`,
@@ -238,6 +253,7 @@ app.post('/execute', async (req, res) => {
     response.error = error;
   }
 
+  console.log(`[POST /execute] finished (ok=${!error}, steps=${completed}/${steps.length})`);
   res.status(error ? 500 : 200).json(response);
 });
 
