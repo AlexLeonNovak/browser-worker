@@ -315,7 +315,7 @@ app.post('/execute', async (req, res) => {
   }
 
   resetTimer(session.sessionId);
-  res.json({ 
+  res.status(!!error ? 500 : 200).json({ 
     ok: !error,
     sessionId: session.sessionId, 
     results, 
