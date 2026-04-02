@@ -315,7 +315,13 @@ app.post('/execute', async (req, res) => {
   }
 
   resetTimer(session.sessionId);
-  res.json({ ok: !error, sessionId: session.sessionId, results, finalUrl: session.page.url() });
+  res.json({ 
+    ok: !error,
+    sessionId: session.sessionId, 
+    results, 
+    finalUrl: session.page.url(), 
+    error: !!error ? error : undefined 
+  });
 });
 
 /**
