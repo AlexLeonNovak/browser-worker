@@ -4,7 +4,10 @@
       "Bash(git init)",
       "Bash(git branch *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(node *)",
+      "Bash(git push)",
+      "Bash(git revert *)"
     ]
   },
   "$version": 3
