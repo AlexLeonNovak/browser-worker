@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 const app = express();
 app.use(express.json());
 
-// Browserless WebSocket endpoint from env
+// Browserless WebSocket URL and token from environment
 const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
@@ -38,160 +38,190 @@ async function closeSession(sessionId) {
   console.log(`[session:${sessionId}] closed. Active: ${sessions.size}`);
 }
 
-// ── POST /sessions ────────────────────────────────────────────────────────────
-app.post('/sessions', async (req, res) => {
-  const ttl    = req.body.ttl    ?? 300_000;
-  const stealth = req.body.stealth ?? true;
+async function createSession(ttl = 300_000, stealth = true) {
+  const wsUrl = getBrowserlessWsUrl();
 
-  try {
-    const wsUrl = getBrowserlessWsUrl();
+  const browser = await chromium.connectOverCDP(wsUrl);
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 800 },
+    locale: 'en-US',
+  });
 
-    // Connect to Browserless via CDP — browser runs in Browserless
-    const browser = await chromium.connectOverCDP(wsUrl);
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 },
-      locale: 'en-US',
+  if (stealth) {
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
+  }
 
-    if (stealth) {
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  const page = await context.newPage();
+  const sessionId = randomUUID();
+
+  sessions.set(sessionId, { browser, context, page, ttl });
+  resetTimer(sessionId, ttl);
+
+  console.log(`[session:${sessionId}] created via Browserless (ttl=${ttl}ms). Active: ${sessions.size}`);
+  return { sessionId, browser, context, page, ttl };
+}
+
+async function executeStep(session, step) {
+  const { action, params = {} } = step;
+  const { page, context } = session;
+
+  switch (action) {
+    case 'goto':
+      await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded' });
+      return { url: page.url() };
+    case 'reload':
+      await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
+      return { url: page.url() };
+    case 'getUrl':
+      return { url: page.url() };
+    case 'getContent':
+      return { html: await page.content() };
+    case 'click':
+      await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
+      return { clicked: params.selector };
+    case 'fill':
+      await page.fill(params.selector, params.value);
+      return { filled: params.selector };
+    case 'type':
+      await page.type(params.selector, params.text, { delay: params.delay ?? 30 });
+      return { typed: params.selector };
+    case 'select':
+      await page.selectOption(params.selector, params.value);
+      return { selected: params.value };
+    case 'check':
+      if (params.state === false) await page.uncheck(params.selector);
+      else await page.check(params.selector);
+      return { checked: params.selector };
+    case 'keyboard':
+      await page.keyboard.press(params.key);
+      return { pressed: params.key };
+    case 'hover':
+      await page.hover(params.selector);
+      return { hovered: params.selector };
+    case 'wait':
+      await page.waitForTimeout(params.ms ?? 1000);
+      return { waited: params.ms };
+    case 'waitForSelector':
+      await page.waitForSelector(params.selector, {
+        state:   params.state   ?? 'visible',
+        timeout: params.timeout ?? 30_000,
+      });
+      return { found: params.selector };
+    case 'waitForNavigation':
+      await page.waitForLoadState(params.waitUntil ?? 'networkidle');
+      return { url: page.url() };
+    case 'evaluate':
+      return { value: await page.evaluate(params.script) };
+    case 'getText':
+      return { text: await page.textContent(params.selector) };
+    case 'getAttribute':
+      return { value: await page.getAttribute(params.selector, params.attr) };
+    case 'screenshot': {
+      const opts = { type: 'png', fullPage: params.fullPage ?? false };
+      const buf  = params.selector
+        ? await page.locator(params.selector).screenshot(opts)
+        : await page.screenshot(opts);
+      return { screenshot: buf.toString('base64') };
+    }
+    case 'getCookies':
+      return { cookies: await context.cookies() };
+    case 'setCookies':
+      await context.addCookies(params.cookies);
+      return { set: params.cookies.length };
+    case 'getLocalStorage':
+      return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
+    default:
+      throw new Error(`Unknown action: "${action}"`);
+  }
+}
+
+async function executeSteps(session, steps, stopOnError = true) {
+  const results = [];
+  
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    try {
+      const result = await executeStep(session, step);
+      results.push({
+        action: step.action,
+        ok: true,
+        result,
+      });
+    } catch (err) {
+      results.push({
+        action: step.action,
+        ok: false,
+        error: err.message,
+      });
+      if (stopOnError) {
+        return { completed: i, results, error: err.message };
+      }
+    }
+  }
+  
+  return { completed: steps.length, results, error: null };
+}
+
+// ── POST /execute ─────────────────────────────────────────────────────────────
+app.post('/execute', async (req, res) => {
+  const { sessionId, ttl = 300_000, stealth = true, steps = [], stopOnError = true } = req.body;
+
+  if (!steps.length) {
+    return res.status(400).json({ ok: false, error: 'steps array is required' });
+  }
+
+  let session = null;
+  let created = false;
+
+  // If sessionId provided, check if session exists
+  if (sessionId) {
+    session = sessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Session not found or expired',
+        sessionId,
       });
     }
-
-    const page      = await context.newPage();
-    const sessionId = randomUUID();
-
-    sessions.set(sessionId, { browser, context, page, ttl });
-    resetTimer(sessionId, ttl);
-
-    console.log(`[session:${sessionId}] created via Browserless (ttl=${ttl}ms). Active: ${sessions.size}`);
-    res.status(201).json({ sessionId, createdAt: new Date().toISOString(), ttl });
-
-  } catch (err) {
-    console.error('Failed to connect to Browserless:', err.message);
-    res.status(503).json({ ok: false, error: `Cannot connect to Browserless: ${err.message}` });
   }
-});
 
-// ── POST /sessions/:id/step ───────────────────────────────────────────────────
-app.post('/sessions/:id/step', async (req, res) => {
-  const { id } = req.params;
-  const { action, params = {}, resetTtl = true } = req.body;
-  const session = sessions.get(id);
-
-  if (!session) return res.status(404).json({ ok: false, error: 'Session not found or expired' });
-
-  const { page } = session;
-  if (resetTtl) resetTimer(id, session.ttl);
-
-  try {
-    let result;
-    switch (action) {
-      case 'goto':
-        await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded' });
-        result = { url: page.url() };
-        break;
-      case 'reload':
-        await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
-        result = { url: page.url() };
-        break;
-      case 'getUrl':
-        result = { url: page.url() };
-        break;
-      case 'getContent':
-        result = { html: await page.content() };
-        break;
-      case 'click':
-        await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
-        result = { clicked: params.selector };
-        break;
-      case 'fill':
-        await page.fill(params.selector, params.value);
-        result = { filled: params.selector };
-        break;
-      case 'type':
-        await page.type(params.selector, params.text, { delay: params.delay ?? 30 });
-        result = { typed: params.selector };
-        break;
-      case 'select':
-        await page.selectOption(params.selector, params.value);
-        result = { selected: params.value };
-        break;
-      case 'check':
-        if (params.state === false) await page.uncheck(params.selector);
-        else await page.check(params.selector);
-        result = { checked: params.selector };
-        break;
-      case 'keyboard':
-        await page.keyboard.press(params.key);
-        result = { pressed: params.key };
-        break;
-      case 'hover':
-        await page.hover(params.selector);
-        result = { hovered: params.selector };
-        break;
-      case 'wait':
-        await page.waitForTimeout(params.ms ?? 1000);
-        result = { waited: params.ms };
-        break;
-      case 'waitForSelector':
-        await page.waitForSelector(params.selector, {
-          state:   params.state   ?? 'visible',
-          timeout: params.timeout ?? 30_000,
-        });
-        result = { found: params.selector };
-        break;
-      case 'waitForNavigation':
-        await page.waitForLoadState(params.waitUntil ?? 'networkidle');
-        result = { url: page.url() };
-        break;
-      case 'evaluate':
-        result = { value: await page.evaluate(params.script) };
-        break;
-      case 'getText':
-        result = { text: await page.textContent(params.selector) };
-        break;
-      case 'getAttribute':
-        result = { value: await page.getAttribute(params.selector, params.attr) };
-        break;
-      case 'screenshot': {
-        const opts = { type: 'png', fullPage: params.fullPage ?? false };
-        const buf  = params.selector
-          ? await page.locator(params.selector).screenshot(opts)
-          : await page.screenshot(opts);
-        result = { screenshot: buf.toString('base64') };
-        break;
-      }
-      case 'getCookies':
-        result = { cookies: await session.context.cookies() };
-        break;
-      case 'setCookies':
-        await session.context.addCookies(params.cookies);
-        result = { set: params.cookies.length };
-        break;
-      case 'getLocalStorage':
-        result = { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
-        break;
-      default:
-        return res.status(400).json({ ok: false, error: `Unknown action: "${action}"` });
+  // If no session, create a new one
+  if (!session) {
+    try {
+      session = await createSession(ttl, stealth);
+      created = true;
+    } catch (err) {
+      return res.status(503).json({
+        ok: false,
+        error: `Cannot connect to Browserless: ${err.message}`,
+      });
     }
-    res.json({ ok: true, action, result });
-  } catch (err) {
-    console.error(`[session:${id}] action="${action}" error:`, err.message);
-    res.status(500).json({ ok: false, action, error: err.message });
   }
-});
 
-// ── POST /sessions/:id/extend ─────────────────────────────────────────────────
-app.post('/sessions/:id/extend', (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
-  const newTtl = req.body.ttl ?? session.ttl;
-  session.ttl  = newTtl;
-  resetTimer(req.params.id, newTtl);
-  res.json({ ok: true, sessionId: req.params.id, ttl: newTtl });
+  // Execute all steps
+  const { completed, results, error } = await executeSteps(session, steps, stopOnError);
+
+  // Reset TTL after execution
+  resetTimer(session.sessionId, session.ttl);
+
+  const response = {
+    ok: !error,
+    sessionId: session.sessionId,
+    created,
+    completedSteps: completed,
+    totalSteps: steps.length,
+    results,
+    finalUrl: session.page.url(),
+  };
+
+  if (error) {
+    response.error = error;
+  }
+
+  res.status(error ? 500 : 200).json(response);
 });
 
 // ── GET /sessions ─────────────────────────────────────────────────────────────
