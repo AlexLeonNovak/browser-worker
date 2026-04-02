@@ -1,4 +1,4 @@
-# browser-worker v2
+# browser-worker
 
 Stateful browser worker for n8n.
 **Browser runs in Browserless** — worker is a thin HTTP↔CDP client (~150MB image).
