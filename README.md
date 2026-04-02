@@ -1,8 +1,6 @@
 # browser-worker
 
 Stateful browser worker for automation tools like n8n.
----
-**Worker runs in Node.js** — exposes a REST API for browser automation.
 
 **Browser runs in Browserless** — worker is a thin HTTP↔CDP client.
 
@@ -37,7 +35,7 @@ Execute one or more browser actions in a single request. Creates a new session i
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `sessionId` | `optional` | UUID of an existing session. |
-| `ttl` | `30000` | Time-to-live in ms. Also used as Browserless session timeout. |
+| `ttl` | `30000` | Time-to-live in ms. Sets the worker-side expiration timer. |
 | `stealth` | `true` | Enable stealth mode to avoid detection. |
 | `blockAds` | `false` | Enable Browserless built-in ad blocker. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
@@ -54,7 +52,7 @@ Execute one or more browser actions in a single request. Creates a new session i
   ],
   "disableSecurity": true,
   "forceHttp": true,
-  "ttl": 60000
+  "ttl": 600000
 }
 ```
 
@@ -71,6 +69,22 @@ Execute one or more browser actions in a single request. Creates a new session i
   "finalUrl": "http://example.com"
 }
 ```
+
+## Session Management & Timeouts
+
+### Dynamic TTL and Extensions
+The `ttl` (Time-To-Live) parameter controls how long a session stays active in the worker's memory after the last request.
+
+- **Initial TTL**: Set when the session is created. Default is 30 seconds.
+- **Session Extension**: Every request to an existing `sessionId` resets the timer using the session's current `ttl`.
+- **Updating TTL**: You can update the `ttl` for an existing session by providing a new `ttl` value in any `/execute` request.
+
+### Browserless Integration
+To allow for long-running and extendable sessions, the worker manages browser lifecycles explicitly:
+- **Buffer Timeout**: When connecting to Browserless, the worker requests a high session timeout (at least 1 hour) as a buffer.
+- **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it calls `browser.close()` explicitly. This immediately signals Browserless to release all associated resources (Chromium processes, data dirs, etc.), ensuring efficient resource management.
+
+---
 
 **Available Actions:**
 
@@ -99,24 +113,24 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `getLocalStorage` | `{ key }` | `{ value }` |
 
 ### GET /sessions
-List all active sessions with their current URLs and TTLs.
+List all active sessions with their current URLs and stored TTL values.
 
 ### GET /sessions/:id
-Get detailed state of a specific session (URL, TTL, status).
+Get detailed state of a specific session.
 
 ### DELETE /sessions/:id
-Close a specific session and release its browser resources.
+Immediately close a session and release its browser resources.
 
 ### GET /health
 Basic health check showing the number of active sessions.
 
 ## Features
 
-- **Stateful Sessions**: Maintain browser state (cookies, local storage, auth) between multiple requests using `sessionId`.
+- **Stateful Sessions**: Maintain browser state (cookies, local storage, authentication) between requests.
 - **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
-- **HTTP Enforcement**: Use `forceHttp: true` to stay on HTTP even if the server tries to redirect to HTTPS.
-- **Stealth mode**: Integrated evasion techniques to bypass bot detection.
-- **Dynamic Session Management**: Control session lifetime via `ttl` per request.
+- **HTTP Enforcement**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
+- **Stealth mode**: Built-in evasion techniques to avoid bot detection.
+- **Extendable Lifecycles**: Dynamically adjust session duration per request.
 
 ## Environment Variables
 

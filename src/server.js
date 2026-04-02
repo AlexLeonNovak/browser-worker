@@ -17,7 +17,11 @@ function getBrowserlessWsUrl(options = {}) {
   
   const { blockAds = false, stealth = true, disableSecurity = false, ttl = 30000 } = options;
   
-  url.searchParams.set('timeout', ttl.toString());
+  // To support session extension, we set a high timeout on Browserless side (e.g., 1 hour).
+  // The worker will manage the actual lifecycle and call browser.close() explicitly.
+  const browserlessTimeout = Math.max(ttl, 3600000); // Minimum 1 hour buffer
+  
+  url.searchParams.set('timeout', browserlessTimeout.toString());
   url.searchParams.set('blockAds', blockAds.toString());
   
   const args = [
@@ -44,16 +48,21 @@ function getBrowserlessWsUrl(options = {}) {
   return url.toString();
 }
 
+// session id -> { sessionId, browser, context, page, ttl, timer }
 const sessions = new Map();
 
 /**
  * Resets the session expiration timer.
  */
-function resetTimer(sessionId, ttl) {
+function resetTimer(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearTimeout(session.timer);
-  session.timer = setTimeout(() => closeSession(sessionId), ttl);
+  
+  session.timer = setTimeout(() => {
+    console.log(`[session:${sessionId}] TTL expired (${session.ttl}ms)`);
+    closeSession(sessionId);
+  }, session.ttl);
 }
 
 /**
@@ -63,7 +72,10 @@ async function closeSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearTimeout(session.timer);
-  try { await session.browser.close(); } catch (e) {}
+  try { 
+    // Explicitly closing the browser tells Browserless to release resources immediately
+    await session.browser.close(); 
+  } catch (e) {}
   sessions.delete(sessionId);
   console.log(`[session:${sessionId}] closed`);
 }
@@ -76,6 +88,15 @@ async function createSession(options = {}) {
   const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
 
   const browser = await chromium.connectOverCDP(wsUrl);
+  
+  // If the browser process is killed externally (e.g. by Browserless timeout)
+  browser.on('disconnected', () => {
+    if (sessions.has(sessionId)) {
+      console.warn(`[session:${sessionId}] Browser disconnected unexpectedly`);
+      sessions.delete(sessionId);
+    }
+  });
+
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
@@ -111,9 +132,9 @@ async function createSession(options = {}) {
   const sessionId = randomUUID();
   const sessionObj = { sessionId, browser, context, page, ttl };
   sessions.set(sessionId, sessionObj);
-  resetTimer(sessionId, ttl);
+  resetTimer(sessionId);
 
-  console.log(`[session:${sessionId}] created (ttl=${ttl}, disableSecurity=${disableSecurity}, forceHttp=${forceHttp})`);
+  console.log(`[session:${sessionId}] created (ttl=${ttl}ms, disableSecurity=${disableSecurity}, forceHttp=${forceHttp})`);
   return sessionObj;
 }
 
@@ -190,7 +211,6 @@ async function executeStep(session, step) {
     case 'getLocalStorage':
       return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
     default:
-      // Last resort fallback to page method
       if (typeof page[action] === 'function') {
         const result = await page[action](params);
         return { result };
@@ -205,7 +225,7 @@ async function executeStep(session, step) {
 app.post('/execute', async (req, res) => {
   const { 
     sessionId, 
-    ttl = 30000, 
+    ttl, 
     stealth = true, 
     blockAds = false, 
     forceHttp = false, 
@@ -220,11 +240,15 @@ app.post('/execute', async (req, res) => {
   if (sessionId && !session) return res.status(404).json({ ok: false, error: 'Session expired' });
 
   if (!session) {
+    const sessionTtl = ttl || 30000;
     try {
-      session = await createSession({ ttl, stealth, blockAds, forceHttp, disableSecurity });
+      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity });
     } catch (err) {
       return res.status(503).json({ ok: false, error: err.message });
     }
+  } else if (ttl) {
+    session.ttl = ttl;
+    console.log(`[session:${session.sessionId}] TTL updated to ${ttl}ms`);
   }
 
   const results = [];
@@ -240,7 +264,7 @@ app.post('/execute', async (req, res) => {
     }
   }
 
-  resetTimer(session.sessionId, ttl);
+  resetTimer(session.sessionId);
   res.json({ ok: !error, sessionId: session.sessionId, results, finalUrl: session.page.url() });
 });
 
