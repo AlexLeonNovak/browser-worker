@@ -57,7 +57,20 @@ async function createSession(ttl = 300_000, stealth = true) {
   }
 
   const page = await context.newPage();
-  await page.setViewportSize({ width: 1920, height: 1080 });
+  page.on('requestfailed', req => {
+    console.log('[requestfailed]', req.url(), req.failure()?.errorText);
+  });
+
+  page.on('console', msg => {
+    console.log('[browser console]', msg.type(), msg.text());
+  });
+
+  page.on('response', res => {
+    if (res.status() >= 400) {
+      console.log('[http]', res.status(), res.url());
+    }
+  });
+  // await page.setViewportSize({ width: 1920, height: 1080 });
   const sessionId = randomUUID();
 
   sessions.set(sessionId, { browser, context, page, ttl });
@@ -123,6 +136,7 @@ async function executeStep(session, step) {
     case 'getAttribute':
       return { value: await page.getAttribute(params.selector, params.attr) };
     case 'screenshot': {
+      await page.setViewportSize({ width: 1920, height: 1080 });
       const opts = { type: 'png', fullPage: params.fullPage ?? false };
       const buf  = params.selector
         ? await page.locator(params.selector).screenshot(opts)
