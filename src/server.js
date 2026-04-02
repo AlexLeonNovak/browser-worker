@@ -8,10 +8,12 @@ app.use(express.json());
 // Browserless WebSocket URL and token from environment
 const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
+const BROWSERLESS_TIMEOUT = process.env.BROWSERLESS_TIMEOUT || 600000; // 10 minutes
 
 function getBrowserlessWsUrl() {
   if (!BROWSERLESS_URL) throw new Error('BROWSERLESS_URL not set');
   const url = new URL(BROWSERLESS_URL);
+  url.searchParams.set('timeout', BROWSERLESS_TIMEOUT);
   if (BROWSERLESS_TOKEN) url.searchParams.set('token', BROWSERLESS_TOKEN);
   return url.toString();
 }
@@ -55,6 +57,7 @@ async function createSession(ttl = 300_000, stealth = true) {
   }
 
   const page = await context.newPage();
+  await page.setViewportSize({ width: 1920, height: 1080 });
   const sessionId = randomUUID();
 
   sessions.set(sessionId, { browser, context, page, ttl });
