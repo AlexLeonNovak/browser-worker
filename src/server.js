@@ -58,7 +58,6 @@ function resetTimer(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearTimeout(session.timer);
-  
   session.timer = setTimeout(() => {
     console.log(`[session:${sessionId}] TTL expired (${session.ttl}ms)`);
     closeSession(sessionId);
@@ -72,21 +71,25 @@ async function closeSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearTimeout(session.timer);
-  try { 
-    // Explicitly closing the browser tells Browserless to release resources immediately
-    await session.browser.close(); 
-  } catch (e) {}
+  try { await session.browser.close(); } catch (e) {}
   sessions.delete(sessionId);
   console.log(`[session:${sessionId}] closed`);
 }
 
 /**
- * Creates a new browser session.
+ * Creates a new browser session with optional popup handling.
  */
 async function createSession(options = {}) {
-  const { ttl = 30000, stealth = true, blockAds = false, forceHttp = false, disableSecurity = false } = options;
-  const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
+  const { 
+    ttl = 30000, 
+    stealth = true, 
+    blockAds = false, 
+    forceHttp = false, 
+    disableSecurity = false,
+    popups = { hide: [], click: [] } // New parameter for auto-handling popups
+  } = options;
 
+  const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
   const browser = await chromium.connectOverCDP(wsUrl);
   
   // If the browser process is killed externally (e.g. by Browserless timeout)
@@ -96,7 +99,7 @@ async function createSession(options = {}) {
       sessions.delete(sessionId);
     }
   });
-
+  
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
@@ -105,6 +108,52 @@ async function createSession(options = {}) {
     bypassCSP: disableSecurity,
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
   });
+
+  // Handle CSS-based hiding of elements
+  if (popups.hide && popups.hide.length > 0) {
+    const css = popups.hide.map(s => `${s} { display: none !important; }`).join('\n');
+    await context.addInitScript((cssContent) => {
+      const style = document.createElement('style');
+      style.innerHTML = cssContent;
+      document.documentElement.appendChild(style);
+      // Also watch for head/body to ensure style stays injected
+      const observer = new MutationObserver(() => {
+        if (!style.isConnected) document.documentElement.appendChild(style);
+      });
+      observer.observe(document.documentElement, { childList: true });
+    }, css);
+  }
+
+  // Handle automatic clicking of popup close buttons via MutationObserver
+  if (popups.click && popups.click.length > 0) {
+    await context.addInitScript((selectors) => {
+      const handlePopups = () => {
+        for (const selector of selectors) {
+          const elements = document.querySelectorAll(selector);
+          for (const el of elements) {
+            if (el && typeof el.click === 'function') {
+              // We use a small check to avoid clicking invisible things too aggressively
+              const style = window.getComputedStyle(el);
+              if (style.display !== 'none' && style.visibility !== 'hidden') {
+                el.click();
+              }
+            }
+          }
+        }
+      };
+      
+      // Run once on load
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', handlePopups);
+      } else {
+        handlePopups();
+      }
+
+      // And watch for new elements appearing
+      const observer = new MutationObserver(handlePopups);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    }, popups.click);
+  }
 
   if (forceHttp) {
     await context.route('**/*', async (route) => {
@@ -134,7 +183,7 @@ async function createSession(options = {}) {
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
 
-  console.log(`[session:${sessionId}] created (ttl=${ttl}ms, disableSecurity=${disableSecurity}, forceHttp=${forceHttp})`);
+  console.log(`[session:${sessionId}] created (popups.hide=${popups.hide?.length}, popups.click=${popups.click?.length})`);
   return sessionObj;
 }
 
@@ -230,6 +279,7 @@ app.post('/execute', async (req, res) => {
     blockAds = false, 
     forceHttp = false, 
     disableSecurity = false, 
+    popups, // { hide: string[], click: string[] }
     steps = [], 
     stopOnError = true 
   } = req.body;
@@ -242,7 +292,7 @@ app.post('/execute', async (req, res) => {
   if (!session) {
     const sessionTtl = ttl || 30000;
     try {
-      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity });
+      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity, popups });
     } catch (err) {
       return res.status(503).json({ ok: false, error: err.message });
     }
