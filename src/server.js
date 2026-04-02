@@ -120,7 +120,7 @@ async function executeStep(session, step) {
     case 'getAttribute':
       return { value: await page.getAttribute(params.selector, params.attr) };
     case 'screenshot': {
-      const opts = { type: 'png', fullPage: params.fullPage ?? false };
+      const opts = { type: 'png', fullPage: params.fullPage ?? true };
       const buf  = params.selector
         ? await page.locator(params.selector).screenshot(opts)
         : await page.screenshot(opts);
