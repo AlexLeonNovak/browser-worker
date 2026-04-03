@@ -90,13 +90,14 @@ async function createSession(options = {}) {
   } = options;
 
   const sessionId = randomUUID();
+  const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
   const wsUrlObj = new URL(getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl }));
 
   // Add trackingId so we can identify this session in Browserless
   wsUrlObj.searchParams.set('trackingId', sessionId);
 
   console.log(`[session:${sessionId}] Connecting to Browserless...`);
-  const browser = await chromium.connectOverCDP(wsUrlObj.toString());
+  const browser = await chromium.connectOverCDP(wsUrl);
 
   // Log Live View URL - Browserless supports searching by trackingId in the debugger
   try {
