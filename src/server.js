@@ -100,7 +100,9 @@ async function createSession(options = {}) {
     const browserId = cdpEndpoint.split('/').pop();
     const liveViewUrl = `https://${host}/devtools/inspector.html?wss=${host}/devtools/browser/${browserId}`;
     console.log(`[session:${sessionId}] Live View URL: ${liveViewUrl}`);
-  } catch (e) {}
+  } catch (e) {
+    console.warn(`[session:${sessionId}] Failed to construct Live View URL: ${e.message}`);
+  }
   
   // If the browser process is killed externally
   browser.on('disconnected', () => {
