@@ -91,22 +91,9 @@ async function createSession(options = {}) {
 
   const sessionId = randomUUID();
   const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
-  const wsUrlObj = new URL(getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl }));
-
-  // Add trackingId so we can identify this session in Browserless
-  wsUrlObj.searchParams.set('trackingId', sessionId);
 
   console.log(`[session:${sessionId}] Connecting to Browserless...`);
   const browser = await chromium.connectOverCDP(wsUrl);
-
-  // Log Live View URL - Browserless supports searching by trackingId in the debugger
-  try {
-    const host = wsUrlObj.host;
-    const liveViewUrl = `https://${host}/debugger?trackingId=${sessionId}`;
-    console.log(`[session:${sessionId}] Live View URL (look for your ID): ${liveViewUrl}`);
-  } catch (e) {
-    console.warn(`[session:${sessionId}] Failed to construct Live View URL: ${e.message}`);
-  }
 
   // If the browser process is killed externally
   browser.on('disconnected', () => {
@@ -207,8 +194,7 @@ async function createSession(options = {}) {
  */
 async function executeStep(session, step) {
   const { action, params = {} } = step;
-  const { page, context, sessionId } = session;
-  console.log(`[session:${sessionId}] action: ${action}`, params);
+  const { page, context } = session;
 
   switch (action) {
     case 'goto':
@@ -320,7 +306,9 @@ app.post('/execute', async (req, res) => {
   let error = null;
   for (const step of steps) {
     try {
+      console.log(`[session:${session.sessionId}] action: ${step.action}`, step.params);
       const result = await executeStep(session, step);
+      console.log(`[session:${session.sessionId}] result: ${step.action}`, result);
       results.push({ action: step.action, ok: true, result });
     } catch (e) {
       results.push({ action: step.action, ok: false, error: e.message });
