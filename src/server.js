@@ -9,7 +9,7 @@ const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
 /**
- * Constructs the Browserless WebSocket URL with provided options.
+ * Constructs the Browserless WebSocket URL.
  */
 function getBrowserlessWsUrl(options = {}) {
   if (!BROWSERLESS_URL) throw new Error('BROWSERLESS_URL not set');
@@ -80,31 +80,26 @@ async function closeSession(sessionId) {
  * Helper to handle popups from the server side before an action.
  */
 async function clearPopups(session) {
-  const { page, popups, sessionId } = session;
+  const { page, popups } = session;
   if (!popups || !popups.click || popups.click.length === 0) return;
-
   try {
     // Try to click all popup selectors at once via browser evaluation for speed
     await page.evaluate((selectors) => {
       for (const selector of selectors) {
-        const elements = document.querySelectorAll(selector);
-        for (const el of elements) {
-          const style = window.getComputedStyle(el);
-          if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-            el.click();
-          }
-        }
+        document.querySelectorAll(selector).forEach(el => {
+          const st = window.getComputedStyle(el);
+          if (st.display !== 'none' && st.visibility !== 'hidden') el.click();
+        });
       }
     }, popups.click);
-  } catch (e) {
-    // console.warn(`[session:${sessionId}] Popup pre-check failed: ${e.message}`);
-  }
+  } catch (e) {}
 }
 
 /**
- * Creates a new browser session with optional popup handling.
+ * Creates a new browser session with AdBlocking and Popup handling.
  */
 async function createSession(options = {}) {
+  console.log('Creating new session with options:', options);
   const { 
     ttl = 30000, 
     stealth = true, 
@@ -127,7 +122,7 @@ async function createSession(options = {}) {
       sessions.delete(sessionId);
     }
   });
-  
+
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
@@ -137,10 +132,64 @@ async function createSession(options = {}) {
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
   });
 
-  // Background Popup Manager (Init Script)
+  // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
+  if (blockAds || forceHttp) {
+    const adPatterns = blockAds ? [
+      'google-analytics.com',
+      'googletagmanager.com',
+      'googlesyndication.com',
+      'googleadservices.com',
+      'adservice.google.com',
+      'googleads.g.doubleclick.net',
+      'doubleclick.net',
+      'adservice.google',
+      'facebook.net',
+      'adform.net',
+      'adnxs.com',
+      'quantserve.com',
+      'scorecardresearch.com',
+      '/ads/',
+      '/banners/',
+      '/pagead/',
+      'external-ads',
+      'ad-delivery',
+      ...(Array.isArray(blockAds) ? blockAds : [])
+    ] : [];
+
+    await context.route('**/*', async (route) => {
+      const url = route.request().url();
+      const urlLower = url.toLowerCase();
+      const resourceType = route.request().resourceType();
+
+      // Check if it's an ad
+      const isAd = blockAds && adPatterns.some(p => urlLower.includes(p));
+      const isHeavyAdMedia = (resourceType === 'media' || resourceType === 'image') && isAd;
+
+      if (isAd) {
+        console.log(`[session:${sessionId}] AdBlock: blocked ${url}`);
+        return route.abort();
+      }
+
+      // Force HTTP redirect
+      if (forceHttp && url.startsWith('https://')) {
+        const httpUrl = url.replace('https://', 'http://');
+        console.log(`[session:${sessionId}] ForceHTTP: redirecting ${url} to ${httpUrl}`);
+        try {
+          const response = await route.fetch({ url: httpUrl });
+          await route.fulfill({ response });
+          return;
+        } catch (e) {
+          // If fetch fails, continue with original request
+        }
+      }
+
+      route.continue();
+    });
+  }
+
+  // Popup Management
   if ((popups.hide && popups.hide.length > 0) || (popups.click && popups.click.length > 0)) {
     await context.addInitScript(({ hide, click }) => {
-      // 1. CSS Hiding
       if (hide && hide.length > 0) {
         const style = document.createElement('style');
         style.innerHTML = hide.map(s => `${s} { display: none !important; }`).join('\n');
@@ -149,14 +198,12 @@ async function createSession(options = {}) {
           if (!style.isConnected) document.documentElement.appendChild(style);
         }).observe(document.documentElement, { childList: true });
       }
-      
-      // 2. Auto Clicking
       if (click && click.length > 0) {
         const handle = () => {
           for (const s of click) {
             document.querySelectorAll(s).forEach(el => {
               const st = window.getComputedStyle(el);
-              if (st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0') {
+              if (st.display !== 'none' && st.visibility !== 'hidden') {
                 el.dispatchEvent(new MouseEvent('click', { bubbles: true, view: window }));
                 if (typeof el.click === 'function') el.click();
               }
@@ -167,21 +214,6 @@ async function createSession(options = {}) {
         setInterval(handle, 2000);
       }
     }, { hide: popups.hide, click: popups.click });
-  }
-
-  if (forceHttp) {
-    await context.route('**/*', async (route) => {
-      const url = route.request().url();
-      if (url.startsWith('https://')) {
-        const httpUrl = url.replace('https://', 'http://');
-        try {
-          const response = await route.fetch({ url: httpUrl });
-          await route.fulfill({ response });
-          return;
-        } catch (e) {}
-      }
-      route.continue();
-    });
   }
 
   if (stealth) {
@@ -216,7 +248,7 @@ async function executeStep(session, step, retry = true) {
   try {
     switch (action) {
       case 'goto':
-      await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
+        await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
         return { url: page.url() };
       case 'reload':
         await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
@@ -226,7 +258,7 @@ async function executeStep(session, step, retry = true) {
       case 'getContent':
         return { html: await page.content() };
       case 'click':
-        await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
+        await page.click(params.selector, { timeout: params.timeout ?? 30000 });
         return { clicked: params.selector };
       case 'fill':
         await page.fill(params.selector, params.value);
@@ -250,10 +282,10 @@ async function executeStep(session, step, retry = true) {
         await page.waitForTimeout(params.ms ?? 1000);
         return { waited: params.ms };
       case 'waitForSelector':
-      await page.waitForSelector(params.selector, { 
-        state: params.state ?? 'visible', 
-        timeout: params.timeout ?? 30_000 
-      });
+        await page.waitForSelector(params.selector, { 
+          state: params.state ?? 'visible', 
+          timeout: params.timeout ?? 30_000 
+        });
         return { found: params.selector };
       case 'waitForNavigation':
         await page.waitForLoadState(params.waitUntil ?? 'networkidle');
@@ -317,7 +349,7 @@ app.post('/execute', async (req, res) => {
   } = req.body;
 
   if (!steps.length) return res.status(400).json({ ok: false, error: 'steps required' });
-
+  
   let session = sessionId ? sessions.get(sessionId) : null;
   if (sessionId && !session) return res.status(404).json({ ok: false, error: 'Session expired' });
 
