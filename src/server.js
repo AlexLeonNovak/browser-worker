@@ -89,21 +89,24 @@ async function createSession(options = {}) {
     popups = { hide: [], click: [] } 
   } = options;
 
-  const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
-  const browser = await chromium.connectOverCDP(wsUrl);
   const sessionId = randomUUID();
+  const wsUrlObj = new URL(getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl }));
 
-  // Log Live View URL for the user to debug in real-time
+  // Add trackingId so we can identify this session in Browserless
+  wsUrlObj.searchParams.set('trackingId', sessionId);
+
+  console.log(`[session:${sessionId}] Connecting to Browserless...`);
+  const browser = await chromium.connectOverCDP(wsUrlObj.toString());
+
+  // Log Live View URL - Browserless supports searching by trackingId in the debugger
   try {
-    const cdpEndpoint = browser.browserWSEndpoint();
-    const host = new URL(BROWSERLESS_URL).host;
-    const browserId = cdpEndpoint.split('/').pop();
-    const liveViewUrl = `https://${host}/devtools/inspector.html?wss=${host}/devtools/browser/${browserId}`;
-    console.log(`[session:${sessionId}] Live View URL: ${liveViewUrl}`);
+    const host = wsUrlObj.host;
+    const liveViewUrl = `https://${host}/debugger?trackingId=${sessionId}`;
+    console.log(`[session:${sessionId}] Live View URL (look for your ID): ${liveViewUrl}`);
   } catch (e) {
     console.warn(`[session:${sessionId}] Failed to construct Live View URL: ${e.message}`);
   }
-  
+
   // If the browser process is killed externally
   browser.on('disconnected', () => {
     if (sessions.has(sessionId)) {
@@ -208,7 +211,7 @@ async function executeStep(session, step) {
 
   switch (action) {
     case 'goto':
-      await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 60000 });
+      await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
       return { url: page.url() };
     case 'reload':
       await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
