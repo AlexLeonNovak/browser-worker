@@ -48,7 +48,7 @@ function getBrowserlessWsUrl(options = {}) {
   return url.toString();
 }
 
-// session id -> { sessionId, browser, context, page, ttl, timer }
+// session id -> { sessionId, browser, context, page, ttl, timer, popups }
 const sessions = new Map();
 
 /**
@@ -74,6 +74,31 @@ async function closeSession(sessionId) {
   try { await session.browser.close(); } catch (e) {}
   sessions.delete(sessionId);
   console.log(`[session:${sessionId}] closed`);
+}
+
+/**
+ * Helper to handle popups from the server side before an action.
+ */
+async function clearPopups(session) {
+  const { page, popups, sessionId } = session;
+  if (!popups || !popups.click || popups.click.length === 0) return;
+
+  try {
+    // Try to click all popup selectors at once via browser evaluation for speed
+    await page.evaluate((selectors) => {
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        for (const el of elements) {
+          const style = window.getComputedStyle(el);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+            el.click();
+          }
+        }
+      }
+    }, popups.click);
+  } catch (e) {
+    // console.warn(`[session:${sessionId}] Popup pre-check failed: ${e.message}`);
+  }
 }
 
 /**
@@ -112,50 +137,36 @@ async function createSession(options = {}) {
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
   });
 
-  // Handle CSS-based hiding of elements
-  if (popups.hide && popups.hide.length > 0) {
-    const css = popups.hide.map(s => `${s} { display: none !important; }`).join('\n');
-    await context.addInitScript((cssContent) => {
-      const style = document.createElement('style');
-      style.innerHTML = cssContent;
-      document.documentElement.appendChild(style);
-      // Also watch for head/body to ensure style stays injected
-      const observer = new MutationObserver(() => {
-        if (!style.isConnected) document.documentElement.appendChild(style);
-      });
-      observer.observe(document.documentElement, { childList: true });
-    }, css);
-  }
-
-  // Handle automatic clicking of popup close buttons via MutationObserver
-  if (popups.click && popups.click.length > 0) {
-    await context.addInitScript((selectors) => {
-      const handlePopups = () => {
-        for (const selector of selectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const el of elements) {
-            if (el && typeof el.click === 'function') {
-              // We use a small check to avoid clicking invisible things too aggressively
-              const style = window.getComputedStyle(el);
-              if (style.display !== 'none' && style.visibility !== 'hidden') {
-                el.click();
-              }
-            }
-          }
-        }
-      };
-      
-      // Run once on load
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', handlePopups);
-      } else {
-        handlePopups();
+  // Background Popup Manager (Init Script)
+  if ((popups.hide && popups.hide.length > 0) || (popups.click && popups.click.length > 0)) {
+    await context.addInitScript(({ hide, click }) => {
+      // 1. CSS Hiding
+      if (hide && hide.length > 0) {
+        const style = document.createElement('style');
+        style.innerHTML = hide.map(s => `${s} { display: none !important; }`).join('\n');
+        document.documentElement.appendChild(style);
+        new MutationObserver(() => {
+          if (!style.isConnected) document.documentElement.appendChild(style);
+        }).observe(document.documentElement, { childList: true });
       }
-
-      // And watch for new elements appearing
-      const observer = new MutationObserver(handlePopups);
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-    }, popups.click);
+      
+      // 2. Auto Clicking
+      if (click && click.length > 0) {
+        const handle = () => {
+          for (const s of click) {
+            document.querySelectorAll(s).forEach(el => {
+              const st = window.getComputedStyle(el);
+              if (st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0') {
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, view: window }));
+                if (typeof el.click === 'function') el.click();
+              }
+            });
+          }
+        };
+        new MutationObserver(handle).observe(document.documentElement, { childList: true, subtree: true });
+        setInterval(handle, 2000);
+      }
+    }, { hide: popups.hide, click: popups.click });
   }
 
   if (forceHttp) {
@@ -181,7 +192,7 @@ async function createSession(options = {}) {
   }
 
   const page = await context.newPage();
-  const sessionObj = { sessionId, browser, context, page, ttl };
+  const sessionObj = { sessionId, browser, context, page, ttl, popups };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
 
@@ -190,82 +201,102 @@ async function createSession(options = {}) {
 }
 
 /**
- * Executes a single step in the browser.
+ * Executes a single step in the browser with retry logic for popups.
  */
-async function executeStep(session, step) {
+async function executeStep(session, step, retry = true) {
   const { action, params = {} } = step;
-  const { page, context } = session;
+  const { page, context, sessionId } = session;
 
-  switch (action) {
-    case 'goto':
+  // Pre-check popups before interactive actions
+  const interactiveActions = ['click', 'fill', 'type', 'check', 'select', 'hover'];
+  if (interactiveActions.includes(action)) {
+    await clearPopups(session);
+  }
+
+  try {
+    switch (action) {
+      case 'goto':
       await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
-      return { url: page.url() };
-    case 'reload':
-      await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
-      return { url: page.url() };
-    case 'getUrl':
-      return { url: page.url() };
-    case 'getContent':
-      return { html: await page.content() };
-    case 'click':
-      await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
-      return { clicked: params.selector };
-    case 'fill':
-      await page.fill(params.selector, params.value);
-      return { filled: params.selector };
-    case 'type':
-      await page.type(params.selector, params.text, { delay: params.delay ?? 30 });
-      return { typed: params.selector };
-    case 'select':
-      await page.selectOption(params.selector, params.value);
-      return { selected: params.value };
-    case 'check':
-      params.state === false ? await page.uncheck(params.selector) : await page.check(params.selector);
-      return { checked: params.selector };
-    case 'keyboard':
-      await page.keyboard.press(params.key);
-      return { pressed: params.key };
-    case 'hover':
-      await page.hover(params.selector);
-      return { hovered: params.selector };
-    case 'wait':
-      await page.waitForTimeout(params.ms ?? 1000);
-      return { waited: params.ms };
-    case 'waitForSelector':
+        return { url: page.url() };
+      case 'reload':
+        await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
+        return { url: page.url() };
+      case 'getUrl':
+        return { url: page.url() };
+      case 'getContent':
+        return { html: await page.content() };
+      case 'click':
+        await page.click(params.selector, { timeout: params.timeout ?? 30_000 });
+        return { clicked: params.selector };
+      case 'fill':
+        await page.fill(params.selector, params.value);
+        return { filled: params.selector };
+      case 'type':
+        await page.type(params.selector, params.text, { delay: params.delay ?? 30 });
+        return { typed: params.selector };
+      case 'select':
+        await page.selectOption(params.selector, params.value);
+        return { selected: params.value };
+      case 'check':
+        params.state === false ? await page.uncheck(params.selector) : await page.check(params.selector);
+        return { checked: params.selector };
+      case 'keyboard':
+        await page.keyboard.press(params.key);
+        return { pressed: params.key };
+      case 'hover':
+        await page.hover(params.selector);
+        return { hovered: params.selector };
+      case 'wait':
+        await page.waitForTimeout(params.ms ?? 1000);
+        return { waited: params.ms };
+      case 'waitForSelector':
       await page.waitForSelector(params.selector, { 
         state: params.state ?? 'visible', 
         timeout: params.timeout ?? 30_000 
       });
-      return { found: params.selector };
-    case 'waitForNavigation':
-      await page.waitForLoadState(params.waitUntil ?? 'networkidle');
-      return { url: page.url() };
-    case 'evaluate':
-      return { value: await page.evaluate(params.script) };
-    case 'getText':
-      return { text: await page.textContent(params.selector) };
-    case 'getAttribute':
-      return { value: await page.getAttribute(params.selector, params.attr) };
-    case 'screenshot': {
-      const opts = { type: 'png', fullPage: params.fullPage ?? false };
+        return { found: params.selector };
+      case 'waitForNavigation':
+        await page.waitForLoadState(params.waitUntil ?? 'networkidle');
+        return { url: page.url() };
+      case 'evaluate':
+        return { value: await page.evaluate(params.script) };
+      case 'getText':
+        return { text: await page.textContent(params.selector) };
+      case 'getAttribute':
+        return { value: await page.getAttribute(params.selector, params.attr) };
+      case 'screenshot': {
+        const opts = { type: 'png', fullPage: params.fullPage ?? false };
       const buf = params.selector
         ? await page.locator(params.selector).screenshot(opts)
         : await page.screenshot(opts);
-      return { screenshot: buf.toString('base64') };
-    }
-    case 'getCookies':
-      return { cookies: await context.cookies() };
-    case 'setCookies':
-      await context.addCookies(params.cookies);
-      return { set: params.cookies.length };
-    case 'getLocalStorage':
-      return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
-    default:
-      if (typeof page[action] === 'function') {
-        const result = await page[action](params);
-        return { result };
+        return { screenshot: buf.toString('base64') };
       }
-      throw new Error(`Unknown action: "${action}"`);
+      case 'getCookies':
+        return { cookies: await context.cookies() };
+      case 'setCookies':
+        await context.addCookies(params.cookies);
+        return { set: params.cookies.length };
+      case 'getLocalStorage':
+        return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
+      default:
+        if (typeof page[action] === 'function') {
+          const result = await page[action](params);
+          return { result };
+        }
+        throw new Error(`Unknown action: "${action}"`);
+    }
+  } catch (err) {
+    // If action failed and it's an interactive one, it might be due to a popup overlay
+    if (retry && interactiveActions.includes(action)) {
+      const isIntercepted = err.message.includes('intercepted') || err.message.includes('timeout');
+      if (isIntercepted) {
+        console.warn(`[session:${sessionId}] Action "${action}" failed/intercepted. Retrying after clearing popups...`);
+        await page.waitForTimeout(1000); // Wait for background script
+        await clearPopups(session);    // Server-side forced clear
+        return await executeStep(session, step, false); // Retry once
+      }
+    }
+    throw err;
   }
 }
 
@@ -280,7 +311,7 @@ app.post('/execute', async (req, res) => {
     blockAds = false, 
     forceHttp = false, 
     disableSecurity = false, 
-    popups, // { hide: string[], click: string[] }
+    popups, 
     steps = [], 
     stopOnError = true 
   } = req.body;
