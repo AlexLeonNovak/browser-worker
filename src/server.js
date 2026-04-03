@@ -86,13 +86,23 @@ async function createSession(options = {}) {
     blockAds = false, 
     forceHttp = false, 
     disableSecurity = false,
-    popups = { hide: [], click: [] } // New parameter for auto-handling popups
+    popups = { hide: [], click: [] } 
   } = options;
 
   const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
   const browser = await chromium.connectOverCDP(wsUrl);
+  const sessionId = randomUUID();
+
+  // Log Live View URL for the user to debug in real-time
+  try {
+    const cdpEndpoint = browser.browserWSEndpoint();
+    const host = new URL(BROWSERLESS_URL).host;
+    const browserId = cdpEndpoint.split('/').pop();
+    const liveViewUrl = `https://${host}/devtools/inspector.html?wss=${host}/devtools/browser/${browserId}`;
+    console.log(`[session:${sessionId}] Live View URL: ${liveViewUrl}`);
+  } catch (e) {}
   
-  // If the browser process is killed externally (e.g. by Browserless timeout)
+  // If the browser process is killed externally
   browser.on('disconnected', () => {
     if (sessions.has(sessionId)) {
       console.warn(`[session:${sessionId}] Browser disconnected unexpectedly`);
@@ -178,7 +188,6 @@ async function createSession(options = {}) {
   }
 
   const page = await context.newPage();
-  const sessionId = randomUUID();
   const sessionObj = { sessionId, browser, context, page, ttl };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
