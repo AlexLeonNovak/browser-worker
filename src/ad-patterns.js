@@ -77,3 +77,30 @@ export const adPatterns = [
   'external-ads',
   'ad-delivery',
 ];
+
+/**
+ * Normalizes the blockAds option into a final list of ad patterns.
+ *
+ * @param {boolean|Array|string|Object} blockAds - The user-provided value.
+ * @returns {Array<string>|null} Final patterns to use, or null if blocking is disabled.
+ *
+ * Rules:
+ *   true                          -> default patterns only
+ *   ["foo.com"]                   -> default + custom (extend)
+ *   { custom: ["foo.com"] }       -> default + custom (extend)
+ *   { useDefaults: false }        -> no patterns (disable defaults, no custom)
+ *   { useDefaults: false, custom: ["foo.com"] } -> custom only
+ */
+export function resolveAdPatterns(blockAds) {
+  if (!blockAds || blockAds === false) return null;
+  if (blockAds === true) return [...adPatterns];
+
+  const custom = Array.isArray(blockAds)
+    ? blockAds
+    : (blockAds.custom || []);
+
+  const useDefaults = blockAds.useDefaults !== false;
+
+  const defaults = useDefaults ? adPatterns : [];
+  return [...defaults, ...custom];
+}

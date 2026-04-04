@@ -1,7 +1,7 @@
 import express from 'express';
 import { chromium } from 'playwright';
 import { randomUUID } from 'crypto';
-import { adPatterns as defaultAdPatterns } from './ad-patterns.js';
+import { resolveAdPatterns } from './ad-patterns.js';
 
 const app = express();
 app.use(express.json());
@@ -23,7 +23,7 @@ function getBrowserlessWsUrl(options = {}) {
   const browserlessTimeout = Math.max(ttl, 3600000); // Minimum 1 hour buffer
 
   url.searchParams.set('timeout', browserlessTimeout.toString());
-  url.searchParams.set('blockAds', blockAds.toString());
+  url.searchParams.set('blockAds', !!blockAds.toString());
 
   const args = [
     '--no-sandbox',
@@ -160,18 +160,17 @@ async function createSession(options = {}) {
   });
 
   // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
-  if (blockAds || forceHttp) {
-    const adPatterns = blockAds ? [
-      ...defaultAdPatterns,
-      ...(Array.isArray(blockAds) ? blockAds : [])
-    ] : [];
+  const patterns = resolveAdPatterns(blockAds);
+  const adBlockingEnabled = patterns !== null;
+
+  if (adBlockingEnabled || forceHttp) {
 
     await context.route('**/*', async (route) => {
       const url = route.request().url();
       const urlLower = url.toLowerCase();
 
       // Check if it's an ad
-      const isAd = blockAds && adPatterns.some(p => urlLower.includes(p));
+      const isAd = adBlockingEnabled && patterns.some(p => urlLower.includes(p));
 
       if (isAd) {
         console.log(`[session:${sessionId}] AdBlock: blocked ${url}`);

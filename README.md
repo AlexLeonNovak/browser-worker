@@ -37,7 +37,7 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `sessionId` | `optional` | UUID of an existing session. |
 | `ttl` | `30000` | Time-to-live in ms. Sets the worker-side expiration timer. |
 | `stealth` | `true` | Enable stealth mode to avoid detection. |
-| `blockAds` | `false` | Enable Browserless built-in ad blocker. |
+| `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
 | `forceHttp` | `false` | Force HTTP by intercepting HTTPS requests and downgrading them. |
 | `steps` | `[]` | Array of actions to execute. |
@@ -70,6 +70,22 @@ Execute one or more browser actions in a single request. Creates a new session i
 }
 ```
 
+### blockAds Examples
+
+```jsonc
+// Default 50+ patterns
+{ "blockAds": true, "steps": [...] }
+
+// Extend defaults with custom patterns
+{ "blockAds": ["my-ads.com", "/custom-path/"], "steps": [...] }
+
+// Custom patterns only (no defaults)
+{ "blockAds": { "useDefaults": false, "custom": ["my-ads.com"] }, "steps": [...] }
+
+// No defaults, no custom (effectively disables worker-side blocking)
+{ "blockAds": { "useDefaults": false }, "steps": [...] }
+```
+
 ## Session Management & Timeouts
 
 ### Dynamic TTL and Extensions
@@ -81,6 +97,7 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 
 ### Browserless Integration
 To allow for long-running and extendable sessions, the worker manages browser lifecycles explicitly:
+- **Heartbeat**: A lightweight `page.evaluate(() => 1)` ping runs every 30 seconds to keep the Browserless WebSocket connection alive. Without this, Browserless closes sessions when it detects no active clients (`keep-until: 0`).
 - **Buffer Timeout**: When connecting to Browserless, the worker requests a high session timeout (at least 1 hour) as a buffer.
 - **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it calls `browser.close()` explicitly. This immediately signals Browserless to release all associated resources (Chromium processes, data dirs, etc.), ensuring efficient resource management.
 
@@ -127,10 +144,13 @@ Basic health check showing the number of active sessions.
 ## Features
 
 - **Stateful Sessions**: Maintain browser state (cookies, local storage, authentication) between requests.
+- **Heartbeat Keep-Alive**: Automatic 30s heartbeat (`page.evaluate`) keeps the Browserless WebSocket connection alive between requests, preventing premature session closure.
 - **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
 - **HTTP Enforcement**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
+- **Ad & Tracker Blocking**: Use `blockAds: true` to block 50+ ad, analytics, and tracking domains. Custom patterns can be passed as an array.
 - **Stealth mode**: Built-in evasion techniques to avoid bot detection.
 - **Extendable Lifecycles**: Dynamically adjust session duration per request.
+- **Customizable Ad Patterns**: Edit `src/ad-patterns.js` to add or remove blocking rules.
 
 ## Environment Variables
 
