@@ -1,6 +1,7 @@
 import express from 'express';
 import { chromium } from 'playwright';
 import { randomUUID } from 'crypto';
+import { adPatterns as defaultAdPatterns } from './ad-patterns.js';
 
 const app = express();
 app.use(express.json());
@@ -20,10 +21,10 @@ function getBrowserlessWsUrl(options = {}) {
   // To support session extension, we set a high timeout on Browserless side (e.g., 1 hour).
   // The worker will manage the actual lifecycle and call browser.close() explicitly.
   const browserlessTimeout = Math.max(ttl, 3600000); // Minimum 1 hour buffer
-  
+
   url.searchParams.set('timeout', browserlessTimeout.toString());
   url.searchParams.set('blockAds', blockAds.toString());
-  
+
   const args = [
     '--no-sandbox',
     '--disable-setuid-sandbox'
@@ -40,7 +41,9 @@ function getBrowserlessWsUrl(options = {}) {
       '--disable-site-isolation-trials'
     );
   }
-  
+
+  // keepAlive was removed in Browserless v2 — unknown parameters cause connection failures.
+  // See: https://docs.browserless.io/baas/migrate
   const launchArgs = { stealth, args };
   url.searchParams.set('launch', JSON.stringify(launchArgs));
   
@@ -48,7 +51,11 @@ function getBrowserlessWsUrl(options = {}) {
   return url.toString();
 }
 
-// session id -> { sessionId, browser, context, page, ttl, timer, popups }
+// Heartbeat interval in ms — keeps Browserless connection alive between requests.
+// Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
+const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
+
+// session id -> { sessionId, browser, context, page, ttl, timer, popups, heartbeat }
 const sessions = new Map();
 
 /**
@@ -65,12 +72,32 @@ function resetTimer(sessionId) {
 }
 
 /**
+ * Starts a periodic heartbeat to keep the Browserless WebSocket connection alive.
+ * Without this, Browserless closes the session when it detects 0 connected clients.
+ */
+function startHeartbeat(session) {
+  const { page, sessionId } = session;
+  session.heartbeat = setInterval(async () => {
+    try {
+      await page.evaluate(() => 1);
+      console.log(`[session:${sessionId}] heartbeat OK`);
+    } catch (e) {
+      console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
+      if (!sessions.has(sessionId)) {
+        clearInterval(session.heartbeat);
+      }
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+/**
  * Closes the browser session and removes it from the sessions map.
  */
 async function closeSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearTimeout(session.timer);
+  clearInterval(session.heartbeat);
   try { await session.browser.close(); } catch (e) {}
   sessions.delete(sessionId);
   console.log(`[session:${sessionId}] closed`);
@@ -135,35 +162,16 @@ async function createSession(options = {}) {
   // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
   if (blockAds || forceHttp) {
     const adPatterns = blockAds ? [
-      'google-analytics.com',
-      'googletagmanager.com',
-      'googlesyndication.com',
-      'googleadservices.com',
-      'adservice.google.com',
-      'googleads.g.doubleclick.net',
-      'doubleclick.net',
-      'adservice.google',
-      'facebook.net',
-      'adform.net',
-      'adnxs.com',
-      'quantserve.com',
-      'scorecardresearch.com',
-      '/ads/',
-      '/banners/',
-      '/pagead/',
-      'external-ads',
-      'ad-delivery',
+      ...defaultAdPatterns,
       ...(Array.isArray(blockAds) ? blockAds : [])
     ] : [];
 
     await context.route('**/*', async (route) => {
       const url = route.request().url();
       const urlLower = url.toLowerCase();
-      const resourceType = route.request().resourceType();
 
       // Check if it's an ad
       const isAd = blockAds && adPatterns.some(p => urlLower.includes(p));
-      const isHeavyAdMedia = (resourceType === 'media' || resourceType === 'image') && isAd;
 
       if (isAd) {
         console.log(`[session:${sessionId}] AdBlock: blocked ${url}`);
@@ -227,6 +235,7 @@ async function createSession(options = {}) {
   const sessionObj = { sessionId, browser, context, page, ttl, popups };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
+  startHeartbeat(sessionObj);
 
   console.log(`[session:${sessionId}] created (popups.hide=${popups.hide?.length}, popups.click=${popups.click?.length})`);
   return sessionObj;
