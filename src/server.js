@@ -8,6 +8,12 @@ app.use(express.json());
 
 const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
+// Heartbeat interval in ms — keeps Browserless connection alive between requests.
+// Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
+const HEARTBEAT_INTERVAL = 20_000; // 20 seconds
+
+// session id -> { sessionId, browser, context, page, ttl, timer, heartbeat }
+const sessions = new Map();
 
 /**
  * Constructs the Browserless WebSocket URL.
@@ -50,13 +56,6 @@ function getBrowserlessWsUrl(options = {}) {
   if (BROWSERLESS_TOKEN) url.searchParams.set('token', BROWSERLESS_TOKEN);
   return url.toString();
 }
-
-// Heartbeat interval in ms — keeps Browserless connection alive between requests.
-// Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
-const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
-
-// session id -> { sessionId, browser, context, page, ttl, timer, popups, heartbeat }
-const sessions = new Map();
 
 /**
  * Resets the session expiration timer.
@@ -104,36 +103,18 @@ async function closeSession(sessionId) {
 }
 
 /**
- * Helper to handle popups from the server side before an action.
- */
-async function clearPopups(session) {
-  const { page, popups } = session;
-  if (!popups || !popups.click || popups.click.length === 0) return;
-  try {
-    // Try to click all popup selectors at once via browser evaluation for speed
-    await page.evaluate((selectors) => {
-      for (const selector of selectors) {
-        document.querySelectorAll(selector).forEach(el => {
-          const st = window.getComputedStyle(el);
-          if (st.display !== 'none' && st.visibility !== 'hidden') el.click();
-        });
-      }
-    }, popups.click);
-  } catch (e) {}
-}
-
-/**
- * Creates a new browser session with AdBlocking and Popup handling.
+ * Creates a new browser session with AdBlocking, CSS/JS injection, and Force HTTP.
  */
 async function createSession(options = {}) {
   console.log('Creating new session with options:', options);
-  const { 
-    ttl = 30000, 
-    stealth = true, 
-    blockAds = false, 
-    forceHttp = false, 
+  const {
+    ttl = 30000,
+    stealth = true,
+    blockAds = false,
+    forceHttp = false,
     disableSecurity = false,
-    popups = { hide: [], click: [] } 
+    addCSS = '',
+    addJS = ''
   } = options;
 
   const sessionId = randomUUID();
@@ -194,35 +175,25 @@ async function createSession(options = {}) {
     });
   }
 
-  // Popup Management
-  if ((popups.hide && popups.hide.length > 0) || (popups.click && popups.click.length > 0)) {
-    await context.addInitScript(({ hide, click }) => {
-      if (hide && hide.length > 0) {
-        const style = document.createElement('style');
-        style.innerHTML = hide.map(s => `${s} { display: none !important; }`).join('\n');
-        document.documentElement.appendChild(style);
-        new MutationObserver(() => {
-          if (!style.isConnected) document.documentElement.appendChild(style);
-        }).observe(document.documentElement, { childList: true });
-      }
-      if (click && click.length > 0) {
-        const handle = () => {
-          for (const s of click) {
-            document.querySelectorAll(s).forEach(el => {
-              const st = window.getComputedStyle(el);
-              if (st.display !== 'none' && st.visibility !== 'hidden') {
-                el.dispatchEvent(new MouseEvent('click', { bubbles: true, view: window }));
-                if (typeof el.click === 'function') el.click();
-              }
-            });
-          }
-        };
-        new MutationObserver(handle).observe(document.documentElement, { childList: true, subtree: true });
-        setInterval(handle, 2000);
-      }
-    }, { hide: popups.hide, click: popups.click });
+  // --- CSS Injection ---
+  if (addCSS) {
+    await context.addInitScript(({ css }) => {
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.documentElement.appendChild(style);
+    }, { css: addCSS });
   }
 
+  // --- JS Injection ---
+  if (addJS) {
+    await context.addInitScript((js) => {
+      const script = document.createElement('script');
+      script.textContent = js;
+      document.documentElement.appendChild(script);
+    }, addJS);
+  }
+
+  // --- Stealth ---
   if (stealth) {
     await context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -231,30 +202,23 @@ async function createSession(options = {}) {
   }
 
   const page = await context.newPage();
-  const sessionObj = { sessionId, browser, context, page, ttl, popups };
+  const sessionObj = { sessionId, browser, context, page, ttl };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
   startHeartbeat(sessionObj);
 
-  console.log(`[session:${sessionId}] created (popups.hide=${popups.hide?.length}, popups.click=${popups.click?.length})`);
+  console.log(`[session:${sessionId}] created`);
   return sessionObj;
 }
 
 /**
- * Executes a single step in the browser with retry logic for popups.
+ * Executes a single step in the browser.
  */
-async function executeStep(session, step, retry = true) {
+async function executeStep(session, step) {
   const { action, params = {} } = step;
   const { page, context, sessionId } = session;
 
-  // Pre-check popups before interactive actions
-  const interactiveActions = ['click', 'fill', 'type', 'check', 'select', 'hover'];
-  if (interactiveActions.includes(action)) {
-    await clearPopups(session);
-  }
-
-  try {
-    switch (action) {
+  switch (action) {
       case 'goto':
         await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
         return { url: page.url() };
@@ -290,9 +254,9 @@ async function executeStep(session, step, retry = true) {
         await page.waitForTimeout(params.ms ?? 1000);
         return { waited: params.ms };
       case 'waitForSelector':
-        await page.waitForSelector(params.selector, { 
-          state: params.state ?? 'visible', 
-          timeout: params.timeout ?? 30_000 
+        await page.waitForSelector(params.selector, {
+          state: params.state ?? 'visible',
+          timeout: params.timeout ?? 30_000
         });
         return { found: params.selector };
       case 'waitForNavigation':
@@ -306,9 +270,9 @@ async function executeStep(session, step, retry = true) {
         return { value: await page.getAttribute(params.selector, params.attr) };
       case 'screenshot': {
         const opts = { type: 'png', fullPage: params.fullPage ?? false };
-      const buf = params.selector
-        ? await page.locator(params.selector).screenshot(opts)
-        : await page.screenshot(opts);
+        const buf = params.selector
+          ? await page.locator(params.selector).screenshot(opts)
+          : await page.screenshot(opts);
         return { screenshot: buf.toString('base64') };
       }
       case 'getCookies':
@@ -325,35 +289,23 @@ async function executeStep(session, step, retry = true) {
         }
         throw new Error(`Unknown action: "${action}"`);
     }
-  } catch (err) {
-    // If action failed and it's an interactive one, it might be due to a popup overlay
-    if (retry && interactiveActions.includes(action)) {
-      const isIntercepted = err.message.includes('intercepted') || err.message.includes('timeout');
-      if (isIntercepted) {
-        console.warn(`[session:${sessionId}] Action "${action}" failed/intercepted. Retrying after clearing popups...`);
-        await page.waitForTimeout(1000); // Wait for background script
-        await clearPopups(session);    // Server-side forced clear
-        return await executeStep(session, step, false); // Retry once
-      }
-    }
-    throw err;
-  }
 }
 
 /**
  * Main execution endpoint.
  */
 app.post('/execute', async (req, res) => {
-  const { 
-    sessionId, 
-    ttl, 
-    stealth = true, 
-    blockAds = false, 
-    forceHttp = false, 
-    disableSecurity = false, 
-    popups, 
-    steps = [], 
-    stopOnError = true 
+  const {
+    sessionId,
+    ttl,
+    stealth = true,
+    blockAds = false,
+    forceHttp = false,
+    disableSecurity = false,
+    addCSS = '',
+    addJS = '',
+    steps = [],
+    stopOnError = true
   } = req.body;
 
   if (!steps.length) return res.status(400).json({ ok: false, error: 'steps required' });
@@ -364,7 +316,7 @@ app.post('/execute', async (req, res) => {
   if (!session) {
     const sessionTtl = ttl || 30000;
     try {
-      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity, popups });
+      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity, addCSS, addJS });
     } catch (err) {
       return res.status(503).json({ ok: false, error: err.message });
     }

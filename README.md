@@ -40,6 +40,8 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
 | `forceHttp` | `false` | Force HTTP by intercepting HTTPS requests and downgrading them. |
+| `addCSS` | `''` | Inject custom CSS into all pages via `<style>` tag before page load. |
+| `addJS` | `''` | Inject custom JS into all pages via `<script>` tag before page load. Use `DOMContentLoaded` listener if DOM access is needed. |
 | `steps` | `[]` | Array of actions to execute. |
 | `stopOnError` | `true` | Stop execution if a step fails. |
 
@@ -52,6 +54,8 @@ Execute one or more browser actions in a single request. Creates a new session i
   ],
   "disableSecurity": true,
   "forceHttp": true,
+  "addCSS": ".ad-banner { display: none !important; }",
+  "addJS": "document.addEventListener('DOMContentLoaded', () => { console.log('injected'); })",
   "ttl": 600000
 }
 ```
@@ -156,7 +160,8 @@ Basic health check showing the number of active sessions.
 - **Heartbeat Keep-Alive**: Automatic 30s heartbeat (`page.evaluate`) keeps the Browserless WebSocket connection alive between requests, preventing premature session closure.
 - **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
 - **HTTP Enforcement**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
-- **Ad & Tracker Blocking**: Use `blockAds: true` to block 50+ ad, analytics, and tracking domains. Custom patterns can be passed as an array.
+- **Ad & Tracker Blocking**: Use `blockAds: true` to block 50+ ad, analytics, and tracking domains. Custom patterns can be passed as an array or object.
+- **Custom CSS/JS Injection**: Inject styles and scripts into every page before load using `addCSS` and `addJS`.
 - **Stealth mode**: Built-in evasion techniques to avoid bot detection.
 - **Extendable Lifecycles**: Dynamically adjust session duration per request.
 - **Customizable Ad Patterns**: Edit `src/ad-patterns.js` to add or remove blocking rules.
