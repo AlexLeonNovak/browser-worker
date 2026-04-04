@@ -72,6 +72,15 @@ Execute one or more browser actions in a single request. Creates a new session i
 
 ### blockAds Examples
 
+| Input | Worker patterns | Browserless native |
+|-------|----------------|-------------------|
+| `true` | default 50+ | ✅ |
+| `["foo.com"]` | default + custom | ✅ |
+| `{ custom: ["foo.com"] }` | default + custom | ✅ |
+| `{ useDefaults: false }` | none | ✅ |
+| `{ useDefaults: false, custom: ["foo.com"] }` | custom only | ✅ |
+| `false` (default) | none | ❌ |
+
 ```jsonc
 // Default 50+ patterns
 { "blockAds": true, "steps": [...] }
