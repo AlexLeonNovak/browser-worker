@@ -229,6 +229,7 @@ async function setupRoutes(session) {
 
   await context.route('**/*', async (route) => {
     const url = route.request().url();
+    console.log(`[session:${sessionId}] Intercepted: ${url}`);
     const urlLower = url.toLowerCase();
     let hostname = '';
     try { hostname = new URL(url).hostname.toLowerCase(); } catch {}
