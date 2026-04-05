@@ -235,11 +235,11 @@ async function setupRoutes(session) {
     // AdBlock
     const isAd = adBlockingEnabled && patterns.some(p => urlLower.includes(p));
     if (isAd) {
-      console.log(`[session:${sessionId}] AdBlock: ${url}`);
+      console.log(`[session:${sessionId}] AdBlock: ${urlLower}`);
       return route.abort();
     }
-    const url = null;
-    try { url = new URL(urlStr); } catch {}
+    let url = null;
+    try { url = new URL(urlLower); } catch {}
     const hostname = url?.hostname?.toLowerCase();
 
     // ForceHTTP — check if this hostname should be forced
