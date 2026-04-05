@@ -229,24 +229,23 @@ async function setupRoutes(session) {
 
   await context.route('**/*', async (route) => {
     const urlStr = route.request().url();
-    console.log(`[session:${sessionId}] Intercepted: ${urlStr}`);
     const urlLower = urlStr.toLowerCase();
 
     // AdBlock
     const isAd = adBlockingEnabled && patterns.some(p => urlLower.includes(p));
     if (isAd) {
-      console.log(`[session:${sessionId}] AdBlock: ${urlLower}`);
+      console.log(`[session:${sessionId}] AdBlock: ${urlStr}`);
       return route.abort();
     }
     let url = null;
-    try { url = new URL(urlLower); } catch {}
+    try { url = new URL(urlStr); } catch {}
     const hostname = url?.hostname?.toLowerCase();
 
     // ForceHTTP — check if this hostname should be forced
     const shouldForceHttp = forceHttp === true || (hostname && forceHttpHosts.has(hostname));
     if (shouldForceHttp && url.protocol === 'https:') {
-      const httpUrl = urlLower.replace(/^https:/, 'http:');
-      console.log(`[session:${sessionId}] ForceHTTP: ${urlLower} → ${httpUrl}`);
+      const httpUrl = urlStr.replace(/^https:/, 'http:');
+      console.log(`[session:${sessionId}] ForceHTTP: ${urlStr} → ${httpUrl}`);
       try {
         const response = await route.fetch({ url: httpUrl });
         await route.fulfill({ response });
