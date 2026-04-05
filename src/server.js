@@ -95,7 +95,6 @@ async function startHeartbeat(session) {
       console.log(`[session:${sessionId}] heartbeat OK`);
     } catch (e) {
       console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
-      clearInterval(session.heartbeat);
       await closeSession(sessionId);
     } finally {
       session.heartbeatInFlight = false;
@@ -406,11 +405,17 @@ app.post('/execute', async (req, res) => {
   }
 
   resetTimer(session.sessionId);
+
+  let finalUrl = null;
+  try {
+    finalUrl = session?.page && !session.page.isClosed() ? session.page.url() : null;
+  } catch {}
+
   res.json({ 
     ok: !error,
     sessionId: session.sessionId, 
     results, 
-    finalUrl: session.page.url(), 
+    finalUrl, 
     error: !!error ? error : undefined 
   });
 });
@@ -452,3 +457,27 @@ app.delete('/sessions/:id', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Worker ready on :${PORT}`));
+
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+});
+
+process.on('exit', (code) => {
+  console.error(`[PROCESS] exit with code ${code}`);
+});
+
+process.on('SIGTERM', () => {
+  console.error('[PROCESS] SIGTERM received');
+});
+
+process.on('SIGINT', () => {
+  console.error('[PROCESS] SIGINT received');
+});
+
+setInterval(() => {
+  console.log(`[PROCESS] alive pid=${process.pid} sessions=${sessions.size} uptime=${Math.round(process.uptime())}s`);
+}, 30000);
