@@ -10,7 +10,7 @@ const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 // Heartbeat interval in ms — keeps Browserless connection alive between requests.
 // Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
-const HEARTBEAT_INTERVAL = 20_000; // 20 seconds
+const HEARTBEAT_INTERVAL = 5000; // 5 seconds
 
 // session id -> { sessionId, browser, context, page, ttl, timer, heartbeat }
 const sessions = new Map();
