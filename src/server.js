@@ -86,7 +86,7 @@ function startHeartbeat(session) {
       if (session.page.isClosed()) throw new Error('Page closed');
       await page.evaluate(() => 1);
       await cdp.send('Runtime.evaluate', { expression: '1' });
-      
+
       console.log(`[session:${sessionId}] heartbeat OK`);
     } catch (e) {
       console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
@@ -138,16 +138,6 @@ async function createSession(options = {}) {
     javaScriptEnabled: true,
     bypassCSP: disableSecurity,
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
-  });
-
-  session.page.on('crash', () => {
-    console.log(`[session:${sessionId}] Page crashed`);
-    closeSession(sessionId);
-  });
-
-  session.context.on('close', () => {
-    console.log(`[session:${sessionId}] Context closed`);
-    closeSession(sessionId);
   });
 
   // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
@@ -212,6 +202,38 @@ async function createSession(options = {}) {
   }
 
   const page = await context.newPage();
+
+  page.on('crash', () => {
+    console.log(`[session:${sessionId}] Page crashed`);
+    closeSession(sessionId);
+  });
+
+  context.on('close', () => {
+    console.log(`[session:${sessionId}] Context closed`);
+    closeSession(sessionId);
+  });
+  page.on('close', () => {
+    console.log(`[session:${sessionId}] Page closed`);
+    closeSession(sessionId);
+  });
+  page.on('error', (err) => {
+    console.log(`[session:${sessionId}] Page error: ${err}`);
+    closeSession(sessionId);
+  });
+  page.on('pageerror', (err) => {
+    console.log(`[session:${sessionId}] Page error: ${err}`);
+    closeSession(sessionId);
+  });
+  page.on('requestfailed', (req) => {
+    console.log(`[session:${sessionId}] Request failed: ${req.url()}`);
+  });
+  page.on('response', (res) => {
+    console.log(`[session:${sessionId}] Response: ${res.url()}`);
+  });
+  page.on('console', (msg) => {
+    console.log(`[session:${sessionId}] Console: ${msg.text()}`);
+  });
+
   const sessionObj = { sessionId, browser, context, page, ttl };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
