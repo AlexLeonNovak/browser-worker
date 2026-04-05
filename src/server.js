@@ -219,8 +219,7 @@ async function setupRoutes(session) {
   const patterns = resolveAdPatterns(blockAds);
   const adBlockingEnabled = patterns !== null;
   
-  if (!forceHttp || !targetHostname?.trim() || adBlockingEnabled) {
-    console.log(`[session:${sessionId}] No forceHttp setup`);
+  if (!forceHttp || !targetHostname?.trim() || !adBlockingEnabled) {
     return;
   }
 
@@ -236,7 +235,7 @@ async function setupRoutes(session) {
     }
 
     // ForceHTTP on target hostname
-    if (hostname.includes(targetHostname) && url.startsWith('https://')) {
+    if (forceHttp && hostname.includes(targetHostname) && url.startsWith('https://')) {
       const httpUrl = url.replace('https://', 'http://');
       console.log(`[session:${sessionId}] ForceHTTP: ${url} → ${httpUrl}`);
       try {
