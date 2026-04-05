@@ -12,7 +12,7 @@ const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 // Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
 const HEARTBEAT_INTERVAL = 1000; // 1 second
 
-// session id -> { sessionId, browser, context, page, ttl, timer, heartbeat }
+// session id -> { sessionId, browser, context, page, ttl, timer, heartbeat, cdp, forceHttpHosts: Set<string>, blockAds, forceHttp }
 const sessions = new Map();
 
 /**
@@ -181,6 +181,9 @@ async function createSession(options = {}) {
 
   const page = await context.newPage();
 
+  // Normalize forceHttp: true = all domains, array = only these domains
+  const forceHttpHosts = Array.isArray(forceHttp) ? new Set(forceHttp) : new Set();
+
   page.on('crash', () => {
     console.log(`[session:${sessionId}] Page crashed`);
     closeSession(sessionId);
@@ -201,7 +204,7 @@ async function createSession(options = {}) {
     console.log(`[session:${sessionId}] Console: ${msg.text()}`);
   });
 
-  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp };
+  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
   await startHeartbeat(sessionObj);
@@ -211,32 +214,36 @@ async function createSession(options = {}) {
 }
 
 async function setupRoutes(session) {
-  const { context, sessionId, targetHostname, forceHttp, blockAds } = session;
-  
+  const { context, sessionId, forceHttp, forceHttpHosts, blockAds } = session;
+
   // Remove existing routes to prevent duplicates on session reuse
   await context.unroute('**/*');
 
   const patterns = resolveAdPatterns(blockAds);
   const adBlockingEnabled = patterns !== null;
-  
-  if (!forceHttp || !targetHostname?.trim() || !adBlockingEnabled) {
+  const forceHttpActive = forceHttp === true || forceHttpHosts.size > 0;
+
+  if (!forceHttpActive && !adBlockingEnabled) {
     return;
   }
 
   await context.route('**/*', async (route) => {
     const url = route.request().url();
-    const hostname = new URL(url).hostname.toLowerCase();
+    const urlLower = url.toLowerCase();
+    let hostname = '';
+    try { hostname = new URL(url).hostname.toLowerCase(); } catch {}
 
     // AdBlock
-    const isAd = adBlockingEnabled && patterns.some(p => url.toLowerCase().includes(p));
+    const isAd = adBlockingEnabled && patterns.some(p => urlLower.includes(p));
     if (isAd) {
       console.log(`[session:${sessionId}] AdBlock: ${url}`);
       return route.abort();
     }
 
-    // ForceHTTP on target hostname
-    if (forceHttp && hostname.includes(targetHostname) && url.startsWith('https://')) {
-      const httpUrl = url.replace('https://', 'http://');
+    // ForceHTTP — check if this hostname should be forced
+    const shouldForceHttp = forceHttp === true || (hostname && forceHttpHosts.has(hostname));
+    if (shouldForceHttp && url.protocol === 'https:') {
+      const httpUrl = url.replace(/^https:/, 'http:');
       console.log(`[session:${sessionId}] ForceHTTP: ${url} → ${httpUrl}`);
       try {
         const response = await route.fetch({ url: httpUrl });
@@ -250,7 +257,8 @@ async function setupRoutes(session) {
     route.continue();
   });
 
-  console.log(`[session:${sessionId}] Routes setup for ${targetHostname}`);
+  const hostInfo = forceHttp === true ? 'all hosts' : `hosts: ${[...forceHttpHosts].join(', ') || 'none'}`;
+  console.log(`[session:${sessionId}] Routes setup — forceHttp: ${hostInfo}, adBlock: ${adBlockingEnabled}`);
 }
 
 /**
@@ -261,12 +269,20 @@ async function executeStep(session, step) {
   const { page, context, sessionId } = session;
 
   switch (action) {
-      case 'goto':
-        const targetHostname = new URL(params.url).hostname.toLowerCase();
-        session.targetHostname = targetHostname;
-        await setupRoutes(session);
+      case 'goto': {
+        try {
+          const targetUrl = new URL(params.url);
+          // Auto-detect: if URL uses http://, add hostname to forceHttpHosts
+          if (targetUrl.protocol === 'http:') {
+            session.forceHttpHosts.add(targetUrl.hostname.toLowerCase());
+          }
+          await setupRoutes(session);
+        } catch (e) {
+          return { error: `Invalid URL: ${params.url}` };
+        }
         await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
         return { url: page.url() };
+      }
       case 'reload':
         await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
         return { url: page.url() };

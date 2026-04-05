@@ -39,7 +39,7 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `stealth` | `true` | Enable stealth mode to avoid detection. |
 | `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
-| `forceHttp` | `false` | Force HTTP by intercepting HTTPS requests and downgrading them. |
+| `forceHttp` | `false` | Force HTTP by downgrading HTTPS requests. Accepts `true` (all domains) or an array of specific hostnames (e.g., `["legacy.com"]`). URLs starting with `http://` in `goto` automatically add their hostname to the list. |
 | `addCSS` | `''` | Inject custom CSS into all pages via `<style>` tag before page load. |
 | `addJS` | `''` | Inject custom JS into all pages via `<script>` tag before page load. Use `DOMContentLoaded` listener if DOM access is needed. |
 | `steps` | `[]` | Array of actions to execute. |
@@ -97,6 +97,31 @@ Execute one or more browser actions in a single request. Creates a new session i
 
 // No defaults, no custom (effectively disables worker-side blocking)
 { "blockAds": { "useDefaults": false }, "steps": [...] }
+```
+
+### forceHttp Examples
+
+| Input | Behavior |
+|-------|----------|
+| `true` | All HTTPS → HTTP |
+| `["legacy.com"]` | Only these hostnames |
+| Auto-detected from `http://` in goto | Hostname added automatically |
+
+```jsonc
+// All domains: HTTPS → HTTP
+{ "forceHttp": true, "steps": [
+  { "action": "goto", "params": { "url": "http://example.com" } }
+]}
+
+// Specific hostnames only
+{ "forceHttp": ["legacy.com", "old.local"], "steps": [
+  { "action": "goto", "params": { "url": "http://legacy.com/page" } }
+]}
+
+// Auto-detect: http:// URL adds its hostname to the force list automatically
+{ "forceHttp": [], "steps": [
+  { "action": "goto", "params": { "url": "http://auto-detected.com" } }
+]}
 ```
 
 ## Session Management & Timeouts
