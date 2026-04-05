@@ -29,7 +29,9 @@ function getBrowserlessWsUrl(options = {}) {
   const browserlessTimeout = Math.max(ttl, 3600000); // Minimum 1 hour buffer
 
   url.searchParams.set('timeout', browserlessTimeout.toString());
-  url.searchParams.set('blockAds', !!blockAds.toString());
+  if (blockAds) {
+    url.searchParams.set('blockAds', 'true');
+  }
 
   const args = [
     '--no-sandbox',
@@ -74,25 +76,29 @@ function resetTimer(sessionId) {
  * Starts a periodic heartbeat to keep the Browserless WebSocket connection alive.
  * Without this, Browserless closes the session when it detects 0 connected clients.
  */
-function startHeartbeat(session) {
+async function startHeartbeat(session) {
   const { page, sessionId } = session;
-  
-  const cdp = page.context().newCDPSession(page);
-  session.cdp = cdp;
+
+  session.cdp = await page.context().newCDPSession(page);
+  session.heartbeatInFlight = false;
 
   session.heartbeat = setInterval(async () => {
+    if (session.busy) return;
+    if (session.heartbeatInFlight) return;
+    session.heartbeatInFlight = true;
+
     try {
       if (!session.browser.isConnected()) throw new Error('Browser disconnected');
       if (session.page.isClosed()) throw new Error('Page closed');
-      await page.evaluate(() => 1);
-      await cdp.send('Runtime.evaluate', { expression: '1' });
 
+      await session.cdp.send('Runtime.evaluate', { expression: '1' });
       console.log(`[session:${sessionId}] heartbeat OK`);
     } catch (e) {
       console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
-      if (!sessions.has(sessionId)) {
-        clearInterval(session.heartbeat);
-      }
+      clearInterval(session.heartbeat);
+      await closeSession(sessionId);
+    } finally {
+      session.heartbeatInFlight = false;
     }
   }, HEARTBEAT_INTERVAL);
 }
@@ -103,9 +109,16 @@ function startHeartbeat(session) {
 async function closeSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
+  if (session.closing) return;
+
+  session.closing = true;
+
   clearTimeout(session.timer);
   clearInterval(session.heartbeat);
-  try { await session.browser.close(); } catch (e) {}
+
+  try { await session.cdp?.detach?.(); } catch {}
+  try { await session.browser.close(); } catch {}
+
   sessions.delete(sessionId);
   console.log(`[session:${sessionId}] closed`);
 }
@@ -218,17 +231,6 @@ async function createSession(options = {}) {
   });
   page.on('error', (err) => {
     console.log(`[session:${sessionId}] Page error: ${err}`);
-    closeSession(sessionId);
-  });
-  page.on('pageerror', (err) => {
-    console.log(`[session:${sessionId}] Page error: ${err}`);
-    closeSession(sessionId);
-  });
-  page.on('requestfailed', (req) => {
-    console.log(`[session:${sessionId}] Request failed: ${req.url()}`);
-  });
-  page.on('response', (res) => {
-    console.log(`[session:${sessionId}] Response: ${res.url()}`);
   });
   page.on('console', (msg) => {
     console.log(`[session:${sessionId}] Console: ${msg.text()}`);
@@ -237,7 +239,7 @@ async function createSession(options = {}) {
   const sessionObj = { sessionId, browser, context, page, ttl };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
-  startHeartbeat(sessionObj);
+  await startHeartbeat(sessionObj);
 
   console.log(`[session:${sessionId}] created`);
   return sessionObj;
@@ -360,6 +362,7 @@ app.post('/execute', async (req, res) => {
   const results = [];
   let error = null;
   for (const step of steps) {
+    session.busy = true;
     try {
       console.log(`[session:${session.sessionId}] action: ${step.action}`, step.params);
       const result = await executeStep(session, step);
@@ -369,6 +372,8 @@ app.post('/execute', async (req, res) => {
       results.push({ action: step.action, ok: false, error: e.message });
       error = e.message;
       if (stopOnError) break;
+    } finally {
+      session.busy = false;
     }
   }
 
