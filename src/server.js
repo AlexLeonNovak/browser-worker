@@ -10,7 +10,7 @@ const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
 const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 // Heartbeat interval in ms — keeps Browserless connection alive between requests.
 // Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
-const HEARTBEAT_INTERVAL = 5000; // 5 seconds
+const HEARTBEAT_INTERVAL = 1000; // 1 second
 
 // session id -> { sessionId, browser, context, page, ttl, timer, heartbeat }
 const sessions = new Map();
@@ -153,41 +153,6 @@ async function createSession(options = {}) {
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
   });
 
-  // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
-  const patterns = resolveAdPatterns(blockAds);
-  const adBlockingEnabled = patterns !== null;
-
-  if (adBlockingEnabled || forceHttp) {
-
-    await context.route('**/*', async (route) => {
-      const url = route.request().url();
-      const urlLower = url.toLowerCase();
-
-      // Check if it's an ad
-      const isAd = adBlockingEnabled && patterns.some(p => urlLower.includes(p));
-
-      if (isAd) {
-        console.log(`[session:${sessionId}] AdBlock: blocked ${url}`);
-        return route.abort();
-      }
-
-      // Force HTTP redirect
-      if (forceHttp && url.startsWith('https://')) {
-        const httpUrl = url.replace('https://', 'http://');
-        console.log(`[session:${sessionId}] ForceHTTP: redirecting ${url} to ${httpUrl}`);
-        try {
-          const response = await route.fetch({ url: httpUrl });
-          await route.fulfill({ response });
-          return;
-        } catch (e) {
-          // If fetch fails, continue with original request
-        }
-      }
-
-      route.continue();
-    });
-  }
-
   // --- CSS Injection ---
   if (addCSS) {
     await context.addInitScript(({ css }) => {
@@ -236,13 +201,57 @@ async function createSession(options = {}) {
     console.log(`[session:${sessionId}] Console: ${msg.text()}`);
   });
 
-  const sessionObj = { sessionId, browser, context, page, ttl };
+  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
   await startHeartbeat(sessionObj);
 
   console.log(`[session:${sessionId}] created`);
   return sessionObj;
+}
+
+async function setupRoutes(session) {
+  const { context, sessionId, targetHostname, forceHttp, blockAds } = session;
+  
+  // Remove existing routes to prevent duplicates on session reuse
+  await context.unroute('**/*');
+
+  const patterns = resolveAdPatterns(blockAds);
+  const adBlockingEnabled = patterns !== null;
+  
+  if (!forceHttp || !targetHostname?.trim() || adBlockingEnabled) {
+    console.log(`[session:${sessionId}] No forceHttp setup`);
+    return;
+  }
+
+  await context.route('**/*', async (route) => {
+    const url = route.request().url();
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    // AdBlock
+    const isAd = adBlockingEnabled && patterns.some(p => url.toLowerCase().includes(p));
+    if (isAd) {
+      console.log(`[session:${sessionId}] AdBlock: ${url}`);
+      return route.abort();
+    }
+
+    // ForceHTTP on target hostname
+    if (hostname.includes(targetHostname) && url.startsWith('https://')) {
+      const httpUrl = url.replace('https://', 'http://');
+      console.log(`[session:${sessionId}] ForceHTTP: ${url} → ${httpUrl}`);
+      try {
+        const response = await route.fetch({ url: httpUrl });
+        await route.fulfill({ response });
+        return;
+      } catch (e) {
+        console.log(`[session:${sessionId}] ForceHTTP failed: ${e.message}`);
+      }
+    }
+
+    route.continue();
+  });
+
+  console.log(`[session:${sessionId}] Routes setup for ${targetHostname}`);
 }
 
 /**
@@ -254,6 +263,9 @@ async function executeStep(session, step) {
 
   switch (action) {
       case 'goto':
+        const targetHostname = new URL(params.url).hostname.toLowerCase();
+        session.targetHostname = targetHostname;
+        await setupRoutes(session);
         await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
         return { url: page.url() };
       case 'reload':
