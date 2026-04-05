@@ -76,9 +76,17 @@ function resetTimer(sessionId) {
  */
 function startHeartbeat(session) {
   const { page, sessionId } = session;
+  
+  const cdp = page.context().newCDPSession(page);
+  session.cdp = cdp;
+
   session.heartbeat = setInterval(async () => {
     try {
+      if (!session.browser.isConnected()) throw new Error('Browser disconnected');
+      if (session.page.isClosed()) throw new Error('Page closed');
       await page.evaluate(() => 1);
+      await cdp.send('Runtime.evaluate', { expression: '1' });
+      
       console.log(`[session:${sessionId}] heartbeat OK`);
     } catch (e) {
       console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
@@ -123,14 +131,6 @@ async function createSession(options = {}) {
   console.log(`[session:${sessionId}] Connecting to Browserless...`);
   const browser = await chromium.connectOverCDP(wsUrl);
 
-  // If the browser process is killed externally
-  browser.on('disconnected', () => {
-    if (sessions.has(sessionId)) {
-      console.warn(`[session:${sessionId}] Browser disconnected unexpectedly`);
-      sessions.delete(sessionId);
-    }
-  });
-
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
@@ -138,6 +138,16 @@ async function createSession(options = {}) {
     javaScriptEnabled: true,
     bypassCSP: disableSecurity,
     extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
+  });
+
+  session.page.on('crash', () => {
+    console.log(`[session:${sessionId}] Page crashed`);
+    closeSession(sessionId);
+  });
+
+  session.context.on('close', () => {
+    console.log(`[session:${sessionId}] Context closed`);
+    closeSession(sessionId);
   });
 
   // --- COMBINED ROUTE HANDLER: Ad-Blocking + Force HTTP ---
