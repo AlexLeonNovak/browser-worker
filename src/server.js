@@ -35,7 +35,11 @@ function getBrowserlessWsUrl(options = {}) {
 
   const args = [
     '--no-sandbox',
-    '--disable-setuid-sandbox'
+    '--disable-setuid-sandbox',
+    '--disable-gpu-memory-buffer-video-frames',
+    '--disable-gpu-memory-buffer-compositor-resources',
+    '--disable-background-networking',
+    '--mute-audio',
   ];
 
   if (disableSecurity) {
@@ -182,26 +186,6 @@ async function createSession(options = {}) {
 
   // Normalize forceHttp: true = all domains, array = only these domains
   const forceHttpHosts = Array.isArray(forceHttp) ? new Set(forceHttp) : new Set();
-
-  page.on('crash', () => {
-    console.log(`[session:${sessionId}] Page crashed`);
-    closeSession(sessionId);
-  });
-
-  context.on('close', () => {
-    console.log(`[session:${sessionId}] Context closed`);
-    closeSession(sessionId);
-  });
-  page.on('close', () => {
-    console.log(`[session:${sessionId}] Page closed`);
-    closeSession(sessionId);
-  });
-  page.on('error', (err) => {
-    console.log(`[session:${sessionId}] Page error: ${err}`);
-  });
-  page.on('console', (msg) => {
-    console.log(`[session:${sessionId}] Console: ${msg.text()}`);
-  });
 
   const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts };
   sessions.set(sessionId, sessionObj);
