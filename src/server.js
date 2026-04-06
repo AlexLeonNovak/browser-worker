@@ -145,7 +145,7 @@ async function createSession(options = {}) {
   const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
 
   console.log(`[session:${sessionId}] Connecting to Browserless...`);
-  const browser = await chromium.connectOverCDP(wsUrl);
+  const browser = await chromium.connect(wsUrl);
 
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -153,7 +153,8 @@ async function createSession(options = {}) {
     ignoreHTTPSErrors: disableSecurity,
     javaScriptEnabled: true,
     bypassCSP: disableSecurity,
-    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
+    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' },
+    processKeepAlive: ttl
   });
 
   // --- CSS Injection ---
