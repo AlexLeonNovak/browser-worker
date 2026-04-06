@@ -90,8 +90,8 @@ async function startHeartbeat(session) {
     try {
       if (!session.browser.isConnected()) throw new Error('Browser disconnected');
       if (session.page.isClosed()) throw new Error('Page closed');
-
-      await session.cdp.send('Runtime.evaluate', { expression: '1' });
+      await page.evaluate(() => 1);
+      // await session.cdp.send('Runtime.evaluate', { expression: '1' });
       console.log(`[session:${sessionId}] heartbeat OK`);
     } catch (e) {
       console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
@@ -466,6 +466,10 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[FATAL] unhandledRejection:', reason);
 });
 
+process.on('beforeExit', (code) => {
+  console.error(`[FATAL] process.beforeExit code=${code}`);
+});
+
 process.on('exit', (code) => {
   console.error(`[PROCESS] exit with code ${code}`);
 });
@@ -479,5 +483,5 @@ process.on('SIGINT', () => {
 });
 
 setInterval(() => {
-  console.log(`[PROCESS] alive pid=${process.pid} sessions=${sessions.size} uptime=${Math.round(process.uptime())}s`);
-}, 30000);
+  console.log(`[PROCESS] alive sessions=${sessions.size} uptime=${Math.round(process.uptime())}s`);
+}, 60000);
