@@ -79,7 +79,7 @@ function resetTimer(sessionId) {
 async function startHeartbeat(session) {
   const { page, sessionId } = session;
 
-  session.cdp = await page.context().newCDPSession(page);
+  // session.cdp = await page.context().newCDPSession(page);
   session.heartbeatInFlight = false;
 
   session.heartbeat = setInterval(async () => {
