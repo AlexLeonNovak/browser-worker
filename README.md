@@ -1,20 +1,20 @@
 # browser-worker
 
-Stateful browser worker for automation tools like n8n.
+REST API browser worker for automation and scraping tasks.
 
-**Browser runs in Browserless** — worker is a thin HTTP↔CDP client.
+**Browser runs locally in the same container** — worker is a thin REST API around Google Chrome.
 
 ## Architecture
 
 ```
-Client ──REST──► browser-worker ──WS/CDP──► browserless ──► Chromium
- (n8n)           (Express API)               (separate container)
+Client ──REST──► browser-worker ──Playwright──► Google Chrome
+ (n8n)           (Express API)                  (same container)
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Copy .env.example → .env and set your BROWSERLESS_URL
+# 1. Copy .env.example → .env (optional)
 cp .env.example .env
 
 # 2. Start
@@ -132,12 +132,7 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 - **Initial TTL**: Set when the session is created. Default is 30 seconds.
 - **Session Extension**: Every request to an existing `sessionId` resets the timer using the session's current `ttl`.
 - **Updating TTL**: You can update the `ttl` for an existing session by providing a new `ttl` value in any `/execute` request.
-
-### Browserless Integration
-To allow for long-running and extendable sessions, the worker manages browser lifecycles explicitly:
-- **Heartbeat**: A lightweight `page.evaluate(() => 1)` ping runs every 30 seconds to keep the Browserless WebSocket connection alive. Without this, Browserless closes sessions when it detects no active clients (`keep-until: 0`).
-- **Buffer Timeout**: When connecting to Browserless, the worker requests a high session timeout (at least 1 hour) as a buffer.
-- **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it calls `browser.close()` explicitly. This immediately signals Browserless to release all associated resources (Chromium processes, data dirs, etc.), ensuring efficient resource management.
+- **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it calls `browser.close()` explicitly, releasing all resources.
 
 ---
 
@@ -182,7 +177,7 @@ Basic health check showing the number of active sessions.
 ## Features
 
 - **Stateful Sessions**: Maintain browser state (cookies, local storage, authentication) between requests.
-- **Heartbeat Keep-Alive**: Automatic 30s heartbeat (`page.evaluate`) keeps the Browserless WebSocket connection alive between requests, preventing premature session closure.
+- **Local Chrome**: Browser runs in the same container — no external dependencies, no WebSocket timeouts.
 - **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
 - **HTTP Enforcement**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
 - **Ad & Tracker Blocking**: Use `blockAds: true` to block 50+ ad, analytics, and tracking domains. Custom patterns can be passed as an array or object.
@@ -195,6 +190,4 @@ Basic health check showing the number of active sessions.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BROWSERLESS_URL` | — | WebSocket URL (e.g., `ws://browserless:3000`) |
-| `BROWSERLESS_TOKEN` | — | Optional Browserless API token |
 | `PORT` | `3001` | Server port |

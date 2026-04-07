@@ -6,62 +6,8 @@ import { resolveAdPatterns } from './ad-patterns.js';
 const app = express();
 app.use(express.json());
 
-const BROWSERLESS_URL   = process.env.BROWSERLESS_URL;
-const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
-// Heartbeat interval in ms — keeps Browserless connection alive between requests.
-// Browserless closes sessions when it detects no active clients; periodic evaluate() resets its timers.
-const HEARTBEAT_INTERVAL = 1000; // 1 second
-
-// session id -> { sessionId, browser, context, page, ttl, timer, heartbeat, cdp, forceHttpHosts: Set<string>, blockAds, forceHttp }
+// session id -> { sessionId, browser, context, page, ttl, timer, forceHttpHosts: Set<string>, blockAds, forceHttp }
 const sessions = new Map();
-
-/**
- * Constructs the Browserless WebSocket URL.
- */
-function getBrowserlessWsUrl(options = {}) {
-  if (!BROWSERLESS_URL) throw new Error('BROWSERLESS_URL not set');
-  const url = new URL(BROWSERLESS_URL);
-  
-  const { blockAds = false, stealth = true, disableSecurity = false, ttl = 30000 } = options;
-  
-  // To support session extension, we set a high timeout on Browserless side (e.g., 1 hour).
-  // The worker will manage the actual lifecycle and call browser.close() explicitly.
-  const browserlessTimeout = Math.max(ttl, 3600000); // Minimum 1 hour buffer
-
-  url.searchParams.set('timeout', browserlessTimeout.toString());
-  if (blockAds) {
-    url.searchParams.set('blockAds', 'true');
-  }
-
-  const args = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-gpu-memory-buffer-video-frames',
-    '--disable-gpu-memory-buffer-compositor-resources',
-    '--disable-background-networking',
-    '--mute-audio',
-  ];
-
-  if (disableSecurity) {
-    args.push(
-      '--disable-web-security',
-      '--allow-running-insecure-content',
-      '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list',
-      '--disable-features=SafeBrowsing,LocalNetworkAccessChecks',
-      '--disable-hsts',
-      '--disable-site-isolation-trials'
-    );
-  }
-
-  // keepAlive was removed in Browserless v2 — unknown parameters cause connection failures.
-  // See: https://docs.browserless.io/baas/migrate
-  const launchArgs = { stealth, args };
-  url.searchParams.set('launch', JSON.stringify(launchArgs));
-  
-  if (BROWSERLESS_TOKEN) url.searchParams.set('token', BROWSERLESS_TOKEN);
-  return url.toString();
-}
 
 /**
  * Resets the session expiration timer.
@@ -77,36 +23,6 @@ function resetTimer(sessionId) {
 }
 
 /**
- * Starts a periodic heartbeat to keep the Browserless WebSocket connection alive.
- * Without this, Browserless closes the session when it detects 0 connected clients.
- */
-async function startHeartbeat(session) {
-  const { page, sessionId } = session;
-
-  // session.cdp = await page.context().newCDPSession(page);
-  session.heartbeatInFlight = false;
-
-  session.heartbeat = setInterval(async () => {
-    if (session.busy) return;
-    if (session.heartbeatInFlight) return;
-    session.heartbeatInFlight = true;
-
-    try {
-      if (!session.browser.isConnected()) throw new Error('Browser disconnected');
-      if (session.page.isClosed()) throw new Error('Page closed');
-      await page.evaluate(() => 1);
-      // await session.cdp.send('Runtime.evaluate', { expression: '1' });
-      console.log(`[session:${sessionId}] heartbeat OK`);
-    } catch (e) {
-      console.warn(`[session:${sessionId}] heartbeat FAILED: ${e.message}`);
-      await closeSession(sessionId);
-    } finally {
-      session.heartbeatInFlight = false;
-    }
-  }, HEARTBEAT_INTERVAL);
-}
-
-/**
  * Closes the browser session and removes it from the sessions map.
  */
 async function closeSession(sessionId) {
@@ -117,9 +33,7 @@ async function closeSession(sessionId) {
   session.closing = true;
 
   clearTimeout(session.timer);
-  clearInterval(session.heartbeat);
 
-  try { await session.cdp?.detach?.(); } catch {}
   try { await session.browser.close(); } catch {}
 
   sessions.delete(sessionId);
@@ -142,19 +56,41 @@ async function createSession(options = {}) {
   } = options;
 
   const sessionId = randomUUID();
-  const wsUrl = getBrowserlessWsUrl({ stealth, blockAds, disableSecurity, ttl });
+   const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-gpu-memory-buffer-video-frames',
+    '--disable-gpu-memory-buffer-compositor-resources',
+    '--disable-background-networking',
+    '--mute-audio',
+  ];
 
-  console.log(`[session:${sessionId}] Connecting to Browserless...`);
-  const browser = await chromium.connect(wsUrl);
+  if (disableSecurity) {
+    args.push(
+      '--disable-web-security',
+      '--allow-running-insecure-content',
+      '--ignore-certificate-errors',
+      '--ignore-certificate-errors-spki-list',
+      '--disable-features=SafeBrowsing,LocalNetworkAccessChecks',
+      '--disable-hsts',
+      '--disable-site-isolation-trials'
+    );
+  }
+
+  console.log(`[session:${sessionId}] Launching Google Chrome...`);
+  const browser = await chromium.launch({
+    headless: true,
+    channel: 'chromium',
+    args,
+  });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
     ignoreHTTPSErrors: disableSecurity,
     javaScriptEnabled: true,
     bypassCSP: disableSecurity,
-    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' },
-    processKeepAlive: ttl
+    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
   });
 
   // --- CSS Injection ---
@@ -191,7 +127,6 @@ async function createSession(options = {}) {
   const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
-  await startHeartbeat(sessionObj);
 
   console.log(`[session:${sessionId}] created`);
   return sessionObj;
@@ -251,7 +186,7 @@ async function setupRoutes(session) {
  */
 async function executeStep(session, step) {
   const { action, params = {} } = step;
-  const { page, context, sessionId } = session;
+  const { page, context } = session;
 
   switch (action) {
       case 'goto': {
