@@ -11,7 +11,24 @@
       "WebFetch(www.browserless.io)",
       "WebSearch",
       "WebFetch(docs.browserless.io)",
-      "WebFetch(github.com)"
+      "WebFetch(github.com)",
+      "Bash(cat)",
+      "Bash(goal: *)",
+      "Bash(challenges:)",
+      "Bash(- *)",
+      "Bash(orbstack)",
+      "Bash(solutions:)",
+      "Bash(results:)",
+      "Bash(direct *)",
+      "Bash(eof)",
+      "Bash(browser *)",
+      "Bash(with *)",
+      "Bash(was *)",
+      "Bash(🚀 *)",
+      "Bash(ls *)",
+      "Bash(cp *)",
+      "Bash(git show *)",
+      "Bash(need *)"
     ]
   },
   "$version": 3

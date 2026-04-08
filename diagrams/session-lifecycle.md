@@ -33,14 +33,16 @@ flowchart TD
 
     Store -.->|TTL expires| Cleanup[browser.close + delete from Map]
 
-    classDef client fill:#1a1a2e,color:#eee,stroke:#00d4ff
-    classDef process fill:#16213e,color:#eee,stroke:#0f3460
-    classDef decision fill:#0f3460,color:#eee,stroke:#533483
-    classDef cleanup fill:#3d0000,color:#eee,stroke:#ff0000
-    classDef response fill:#003d00,color:#eee,stroke:#00ff00
+    classDef client fill:#1F4E79,stroke:#1F4E79,color:#FFFFFF
+    classDef process fill:#F0F0F0,stroke:#888888,color:#444444
+    classDef decision fill:#FEF9E7,stroke:#B7950B,color:#7D6608
+    classDef cleanup fill:#C0392B,stroke:#922B21,color:#FFFFFF
+    classDef response fill:#D5F5E3,stroke:#1A7A4A,color:#145A32
+    classDef loop fill:#D6E4F0,stroke:#2E75B6,color:#1F4E79
 
     class Client,Done client
-    class Create,Launch,Context,Page,Store,Reuse,UpdateTTL,Execute,Step,Action,Result,Response,ResetTTL process
+    class Create,Launch,Context,Page,Store,Reuse,UpdateTTL,Execute,Action,Result,Response,ResetTTL process
+    class Step loop
     class Check,Lookup,StopOnError decision
     class Cleanup,Cleanup2 cleanup
     class Response response

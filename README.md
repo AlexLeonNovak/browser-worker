@@ -191,3 +191,22 @@ Basic health check showing the number of active sessions.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | Server port |
+
+## Diagrams
+
+- **[Session Lifecycle](./diagrams/session-lifecycle.md)** — Full lifecycle from session creation through TTL expiry and cleanup
+- **[Request Interception Flow](./diagrams/request-interception.md)** — How ad blocking and force-HTTP request routing works
+
+## Support
+
+If this project is useful to you, you can support ongoing maintenance here:
+
+- [Support on Ko-fi](https://ko-fi.com/alexnovak)
+- [Support on Donatello](https://donatello.to/alexnovak)
+- [Support on Monobank](https://send.monobank.ua/jar/68tMxnVGqk)
+
+Your support helps fund maintenance, fixes, documentation, and future improvements.
+
+## License
+
+MIT. See [LICENSE](./LICENSE) for details.

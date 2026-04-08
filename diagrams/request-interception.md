@@ -28,12 +28,11 @@ flowchart TD
     Fulfill --> Log2[Log: ForceHTTP redirect URL → http://URL]
     Continue --> End[Request proceeds normally]
 
-    classDef start fill:#1a1a2e,color:#eee,stroke:#00d4ff
-    classDef process fill:#16213e,color:#eee,stroke:#0f3460
-    classDef decision fill:#0f3460,color:#eee,stroke:#533483
-    classDef block fill:#3d0000,color:#eee,stroke:#ff0000
-    classDef redirect fill:#3d2e00,color:#eee,stroke:#ffaa00
-    classDef normal fill:#003d00,color:#eee,stroke:#00ff00
+    classDef start fill:#1F4E79,stroke:#1F4E79,color:#FFFFFF
+    classDef decision fill:#FEF9E7,stroke:#B7950B,color:#7D6608
+    classDef block fill:#C0392B,stroke:#922B21,color:#FFFFFF
+    classDef redirect fill:#2E75B6,stroke:#1F4E79,color:#FFFFFF
+    classDef normal fill:#D5F5E3,stroke:#1A7A4A,color:#145A32
 
     class Page,Route,Parse start
     class AdCheck,ForceCheck,Match,IsHTTPS,ShouldForce,Fail decision
