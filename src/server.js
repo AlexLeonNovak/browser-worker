@@ -1,7 +1,16 @@
 import express from 'express';
-import { chromium } from 'playwright';
+import { chromium } from 'patchright';
 import { randomUUID } from 'crypto';
 import { resolveAdPatterns } from './ad-patterns.js';
+import {
+  SUPPORTED_TYPES as CAPTCHA_TYPES,
+  DEFAULT_USER_AGENT,
+  resolveCaptchaConfig,
+  createSolver,
+  autoDetectSiteKey,
+  injectCaptchaToken,
+  proxyToCapsolverString
+} from './captcha-solver.js';
 
 const app = express();
 app.use(express.json());
@@ -47,7 +56,10 @@ async function createSession(options = {}) {
   console.log('Creating new session with options:', options);
   const {
     ttl = 30000,
-    stealth = true,
+    headless = true,
+    proxy = null,
+    captchaConfig = null,
+    userAgent = DEFAULT_USER_AGENT,
     blockAds = false,
     forceHttp = false,
     disableSecurity = false,
@@ -56,7 +68,7 @@ async function createSession(options = {}) {
   } = options;
 
   const sessionId = randomUUID();
-   const args = [
+  const args = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-gpu-memory-buffer-video-frames',
@@ -77,20 +89,21 @@ async function createSession(options = {}) {
     );
   }
 
-  console.log(`[session:${sessionId}] Launching Google Chrome...`);
+  console.log(`[session:${sessionId}] Launching Google Chrome (headless=${headless}, proxy=${proxy ? proxy.server : 'none'})...`);
   const browser = await chromium.launch({
-    headless: true,
-    channel: 'chromium',
+    headless,
+    channel: 'chrome',
     args,
   });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    userAgent,
     viewport: { width: 1920, height: 1080 },
     ignoreHTTPSErrors: disableSecurity,
     javaScriptEnabled: true,
     bypassCSP: disableSecurity,
-    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' }
+    extraHTTPHeaders: { 'Upgrade-Insecure-Requests': '0' },
+    ...(proxy ? { proxy } : {})
   });
 
   // --- CSS Injection ---
@@ -111,20 +124,12 @@ async function createSession(options = {}) {
     }, addJS);
   }
 
-  // --- Stealth ---
-  if (stealth) {
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      window.chrome = { runtime: {} };
-    });
-  }
-
   const page = await context.newPage();
 
   // Normalize forceHttp: true = all domains, array = only these domains
   const forceHttpHosts = Array.isArray(forceHttp) ? new Set(forceHttp) : new Set();
 
-  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts };
+  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts, captchaConfig, proxy };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
 
@@ -263,6 +268,79 @@ async function executeStep(session, step) {
         return { set: params.cookies.length };
       case 'getLocalStorage':
         return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
+      case 'solveCaptcha': {
+        const { type, siteKey, action: cfAction, cdata, score, url, inject = true } = params;
+        if (!type || !CAPTCHA_TYPES.includes(type)) {
+          throw new Error(`solveCaptcha: "type" must be one of ${CAPTCHA_TYPES.join(', ')}`);
+        }
+        const solver = createSolver(session.captchaConfig);
+        if (!solver) {
+          throw new Error('solveCaptcha: no captcha solver configured. Set CAPTCHA_API_KEY_2CAPTCHA / CAPTCHA_API_KEY_CAPSOLVER in env, or pass captchaSolver in /execute body.');
+        }
+        const pageUrl = url || page.url();
+        const t0 = Date.now();
+
+        // Cloudflare Challenge has a different shape: needs proxy + UA, returns cf_clearance cookie.
+        if (type === 'cloudflare-challenge') {
+          if (solver.name !== 'capsolver') {
+            throw new Error('cloudflare-challenge is only supported by the "capsolver" provider.');
+          }
+          const proxyStr = proxyToCapsolverString(session.proxy);
+          if (!proxyStr) {
+            throw new Error('cloudflare-challenge requires the session to be created with a "proxy" — CapSolver enforces a matching proxy.');
+          }
+          const userAgent = await page.evaluate(() => navigator.userAgent);
+          console.log(`[session:${session.sessionId}] solveCaptcha cloudflare-challenge: url=${pageUrl}`);
+          const result = await solver.solve(type, { pageUrl, proxy: proxyStr, userAgent });
+          const elapsed = Date.now() - t0;
+          const clearance = result?.cookies?.cf_clearance;
+          if (!clearance) {
+            throw new Error(`CapSolver did not return cf_clearance cookie: ${JSON.stringify(result)}`);
+          }
+          if (inject) {
+            const u = new URL(pageUrl);
+            await context.addCookies([{
+              name: 'cf_clearance',
+              value: clearance,
+              domain: u.hostname,
+              path: '/',
+              httpOnly: true,
+              secure: true,
+              sameSite: 'None'
+            }]);
+          }
+          console.log(`[session:${session.sessionId}] cloudflare-challenge solved in ${elapsed}ms (cf_clearance len=${clearance.length})`);
+          return {
+            solved: true,
+            type,
+            provider: solver.name,
+            elapsedMs: elapsed,
+            cookies: { cf_clearance: clearance },
+            userAgent: result.userAgent || userAgent
+          };
+        }
+
+        // Token-based captchas: turnstile, recaptcha v2/v3, hcaptcha.
+        let resolvedSiteKey = siteKey;
+        if (!resolvedSiteKey) {
+          resolvedSiteKey = await autoDetectSiteKey(page, type);
+        }
+        if (!resolvedSiteKey) {
+          throw new Error(`solveCaptcha: siteKey not provided and could not be auto-detected for ${type}`);
+        }
+        console.log(`[session:${session.sessionId}] solveCaptcha via ${solver.name}: type=${type}, siteKey=${resolvedSiteKey}, url=${pageUrl}`);
+        const result = await solver.solve(type, { siteKey: resolvedSiteKey, pageUrl, action: cfAction, cdata, score });
+        const token = result?.token;
+        const elapsed = Date.now() - t0;
+        if (!token) {
+          throw new Error(`${solver.name} returned no token: ${JSON.stringify(result)}`);
+        }
+        console.log(`[session:${session.sessionId}] solveCaptcha solved in ${elapsed}ms (tokenLen=${token.length})`);
+        if (inject) {
+          await injectCaptchaToken(page, type, token);
+        }
+        return { solved: true, type, provider: solver.name, elapsedMs: elapsed, tokenLength: token.length, token };
+      }
       default:
         if (typeof page[action] === 'function') {
           const result = await page[action](params);
@@ -279,7 +357,10 @@ app.post('/execute', async (req, res) => {
   const {
     sessionId,
     ttl,
-    stealth = true,
+    headless = true,
+    proxy = null,
+    captchaSolver = null,
+    userAgent,
     blockAds = false,
     forceHttp = false,
     disableSecurity = false,
@@ -290,20 +371,43 @@ app.post('/execute', async (req, res) => {
   } = req.body;
 
   if (!steps.length) return res.status(400).json({ ok: false, error: 'steps required' });
-  
+
+  if (proxy !== null) {
+    if (typeof proxy !== 'object' || !proxy.server || typeof proxy.server !== 'string') {
+      return res.status(400).json({ ok: false, error: 'proxy must be an object with a "server" string (e.g. "http://host:port")' });
+    }
+  }
+
+  if (captchaSolver !== null) {
+    if (typeof captchaSolver !== 'object' || !captchaSolver.apiKey) {
+      return res.status(400).json({ ok: false, error: 'captchaSolver must be an object with at least an "apiKey" string' });
+    }
+    if (captchaSolver.provider && !['2captcha', 'capsolver'].includes(captchaSolver.provider)) {
+      return res.status(400).json({ ok: false, error: 'captchaSolver.provider must be "2captcha" or "capsolver"' });
+    }
+  }
+
+  const captchaConfig = resolveCaptchaConfig(captchaSolver);
+
   let session = sessionId ? sessions.get(sessionId) : null;
   if (sessionId && !session) return res.status(404).json({ ok: false, error: 'Session expired' });
 
   if (!session) {
     const sessionTtl = ttl || 30000;
     try {
-      session = await createSession({ ttl: sessionTtl, stealth, blockAds, forceHttp, disableSecurity, addCSS, addJS });
+      session = await createSession({ ttl: sessionTtl, headless, proxy, captchaConfig, userAgent, blockAds, forceHttp, disableSecurity, addCSS, addJS });
     } catch (err) {
       return res.status(503).json({ ok: false, error: err.message });
     }
-  } else if (ttl) {
-    session.ttl = ttl;
-    console.log(`[session:${session.sessionId}] TTL updated to ${ttl}ms`);
+  } else {
+    if (ttl) {
+      session.ttl = ttl;
+      console.log(`[session:${session.sessionId}] TTL updated to ${ttl}ms`);
+    }
+    if (captchaSolver) {
+      session.captchaConfig = captchaConfig;
+      console.log(`[session:${session.sessionId}] captchaSolver updated to ${captchaConfig.provider}`);
+    }
   }
 
   const results = [];
