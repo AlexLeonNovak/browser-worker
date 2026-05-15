@@ -33,27 +33,55 @@ export function proxyToCapsolverString(p) {
 
 /**
  * Resolves captcha solver config from optional per-request body and ENV defaults.
- * Returns { provider, apiKey } — apiKey may be undefined if nothing is configured.
+ * Returns { provider, apiKey?, url? } — fields may be missing if nothing is configured.
  */
 export function resolveCaptchaConfig(bodyConfig) {
-  if (bodyConfig && typeof bodyConfig === 'object' && bodyConfig.apiKey) {
-    return {
-      provider: bodyConfig.provider || process.env.CAPTCHA_PROVIDER || '2captcha',
-      apiKey: bodyConfig.apiKey
-    };
+  const envProvider = process.env.CAPTCHA_PROVIDER || '2captcha';
+  if (bodyConfig && typeof bodyConfig === 'object') {
+    const provider = bodyConfig.provider || envProvider;
+    if (provider === 'flaresolverr') {
+      const url = bodyConfig.url || process.env.FLARESOLVERR_URL || 'http://flaresolverr:8191';
+      return { provider, url };
+    }
+    if (bodyConfig.apiKey) {
+      return { provider, apiKey: bodyConfig.apiKey };
+    }
   }
-  const provider = process.env.CAPTCHA_PROVIDER || '2captcha';
-  const apiKey = provider === 'capsolver'
+  if (envProvider === 'flaresolverr') {
+    return { provider: 'flaresolverr', url: process.env.FLARESOLVERR_URL || 'http://flaresolverr:8191' };
+  }
+  const apiKey = envProvider === 'capsolver'
     ? process.env.CAPTCHA_API_KEY_CAPSOLVER
     : process.env.CAPTCHA_API_KEY_2CAPTCHA;
-  return { provider, apiKey };
+  return { provider: envProvider, apiKey };
 }
 
 export function createSolver(config) {
-  if (!config || !config.apiKey) return null;
-  if (config.provider === '2captcha') return new TwoCaptchaSolver(config.apiKey);
-  if (config.provider === 'capsolver') return new CapSolverSolver(config.apiKey);
-  throw new Error(`Unknown captcha provider: ${config.provider}`);
+  if (!config) return null;
+  if (config.provider === '2captcha' && config.apiKey) return new TwoCaptchaSolver(config.apiKey);
+  if (config.provider === 'capsolver' && config.apiKey) return new CapSolverSolver(config.apiKey);
+  if (config.provider === 'flaresolverr' && config.url) return new FlareSolverrSolver(config.url);
+  return null;
+}
+
+/**
+ * Polls the context cookie jar until `cf_clearance` for `hostname` shows up,
+ * or timeout. Returns the full cookie object or null on timeout.
+ */
+export async function waitForCloudflareCookie(context, hostname, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  const hostMatches = (cookieDomain) => {
+    if (!cookieDomain) return false;
+    const d = cookieDomain.replace(/^\./, '');
+    return hostname === d || hostname.endsWith('.' + d);
+  };
+  while (Date.now() < deadline) {
+    const cookies = await context.cookies();
+    const cf = cookies.find(c => c.name === 'cf_clearance' && hostMatches(c.domain));
+    if (cf) return cf;
+    await sleep(500);
+  }
+  return null;
 }
 
 class TwoCaptchaSolver {
@@ -216,6 +244,64 @@ class CapSolverSolver {
       }
     }
     throw new Error('CapSolver solve timeout');
+  }
+}
+
+/**
+ * FlareSolverr is a self-hosted Cloudflare bypass — it runs its own headless
+ * browser, waits for the challenge to pass, and returns cookies + UA.
+ * Free, no API key, but requires a running flaresolverr container.
+ *
+ * Only supports cloudflare-challenge type. Other captchas fall back to the
+ * configured 2captcha/capsolver provider.
+ */
+class FlareSolverrSolver {
+  constructor(url) {
+    this.url = url.replace(/\/$/, '');
+    this.name = 'flaresolverr';
+  }
+
+  async solve(type, params) {
+    if (type !== CLOUDFLARE_CHALLENGE) {
+      throw new Error(`FlareSolverr only supports "cloudflare-challenge" (got "${type}")`);
+    }
+    return await this._solveCfChallenge(params);
+  }
+
+  async _solveCfChallenge({ pageUrl, proxy, maxTimeoutMs = 60000 }) {
+    const body = {
+      cmd: 'request.get',
+      url: pageUrl,
+      maxTimeout: maxTimeoutMs
+    };
+    if (proxy && proxy.server) {
+      const proxyEntry = { url: proxy.server };
+      if (proxy.username) proxyEntry.username = proxy.username;
+      if (proxy.password) proxyEntry.password = proxy.password;
+      body.proxy = proxyEntry;
+    }
+
+    const res = await fetch(`${this.url}/v1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (json.status !== 'ok') {
+      throw new Error(`FlareSolverr failed: ${json.message || JSON.stringify(json)}`);
+    }
+    const solution = json.solution || {};
+    const cookieList = solution.cookies || [];
+    const cookiesMap = cookieList.reduce((acc, c) => { acc[c.name] = c.value; return acc; }, {});
+    if (!cookiesMap.cf_clearance) {
+      throw new Error('FlareSolverr returned no cf_clearance cookie — page may not have been behind Cloudflare');
+    }
+    return {
+      token: null,
+      cookies: cookiesMap,
+      userAgent: solution.userAgent || null,
+      allCookies: cookieList
+    };
   }
 }
 

@@ -6,5 +6,23 @@ services:
     platform: linux/amd64
     shm_size: 2gb
     mem_limit: 6g
+    depends_on:
+      - flaresolverr
+    environment:
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191}
+      CAPTCHA_PROVIDER: ${CAPTCHA_PROVIDER:-2captcha}
+      CAPTCHA_API_KEY_2CAPTCHA: ${CAPTCHA_API_KEY_2CAPTCHA:-}
+      CAPTCHA_API_KEY_CAPSOLVER: ${CAPTCHA_API_KEY_CAPSOLVER:-}
     ports:
       - ${PORT:-3001}:${PORT:-3001}
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    platform: linux/amd64
+    environment:
+      LOG_LEVEL: info
+      TZ: UTC
+    expose:
+      - "8191"

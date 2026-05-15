@@ -9,8 +9,109 @@ import {
   createSolver,
   autoDetectSiteKey,
   injectCaptchaToken,
-  proxyToCapsolverString
+  proxyToCapsolverString,
+  waitForCloudflareCookie
 } from './captcha-solver.js';
+
+const CF_STRATEGIES = ['auto', 'wait', 'flaresolverr', 'capsolver', '2captcha'];
+
+/**
+ * Try each Cloudflare Challenge strategy in turn and return the first success.
+ * Each strategy is a function returning { strategy, cookies, userAgent?, allCookies? }
+ * or throwing.
+ */
+async function solveCloudflareChallenge({ session, page, context, pageUrl, params }) {
+  const strategy = params.strategy || 'auto';
+  if (!CF_STRATEGIES.includes(strategy)) {
+    throw new Error(`solveCaptcha: strategy must be one of ${CF_STRATEGIES.join(', ')}`);
+  }
+  const hostname = new URL(pageUrl).hostname;
+  const waitTimeoutMs = params.waitTimeoutMs ?? 15000;
+
+  const tryWait = async () => {
+    const cookie = await waitForCloudflareCookie(context, hostname, waitTimeoutMs);
+    if (!cookie) throw new Error(`cf_clearance did not appear within ${waitTimeoutMs}ms`);
+    return { strategy: 'wait', cookies: { cf_clearance: cookie.value }, allCookies: [cookie] };
+  };
+
+  const tryFlareSolverr = async () => {
+    const url = process.env.FLARESOLVERR_URL || 'http://flaresolverr:8191';
+    const fsSolver = createSolver({ provider: 'flaresolverr', url });
+    if (!fsSolver) throw new Error('FlareSolverr URL not configured');
+    const r = await fsSolver.solve('cloudflare-challenge', { pageUrl, proxy: session.proxy });
+    return { strategy: 'flaresolverr', cookies: r.cookies, userAgent: r.userAgent, allCookies: r.allCookies };
+  };
+
+  const tryCapSolver = async () => {
+    const cfg = session.captchaConfig?.provider === 'capsolver'
+      ? session.captchaConfig
+      : { provider: 'capsolver', apiKey: process.env.CAPTCHA_API_KEY_CAPSOLVER };
+    if (!cfg.apiKey) throw new Error('CapSolver apiKey not configured');
+    const proxyStr = proxyToCapsolverString(session.proxy);
+    if (!proxyStr) throw new Error('CapSolver requires a session proxy');
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+    const capSolver = createSolver(cfg);
+    const r = await capSolver.solve('cloudflare-challenge', { pageUrl, proxy: proxyStr, userAgent });
+    if (!r?.cookies?.cf_clearance) throw new Error(`CapSolver returned no cf_clearance: ${JSON.stringify(r)}`);
+    return { strategy: 'capsolver', cookies: r.cookies, userAgent: r.userAgent || userAgent };
+  };
+
+  const try2CaptchaTurnstile = async () => {
+    const cfg = session.captchaConfig?.provider === '2captcha'
+      ? session.captchaConfig
+      : { provider: '2captcha', apiKey: process.env.CAPTCHA_API_KEY_2CAPTCHA };
+    if (!cfg.apiKey) throw new Error('2Captcha apiKey not configured');
+    const widget = await page.evaluate(() => {
+      const el = document.querySelector('.cf-turnstile[data-sitekey]')
+        || document.querySelector('[data-sitekey]');
+      if (!el) return null;
+      return {
+        siteKey: el.getAttribute('data-sitekey'),
+        action: el.getAttribute('data-action') || undefined,
+        cdata: el.getAttribute('data-cdata') || undefined
+      };
+    });
+    if (!widget?.siteKey) {
+      throw new Error('No Turnstile widget on page — 2captcha strategy only works for interactive CF challenges');
+    }
+    const twoCaptchaSolver = createSolver(cfg);
+    const r = await twoCaptchaSolver.solve('turnstile', {
+      siteKey: widget.siteKey, pageUrl, action: widget.action, cdata: widget.cdata
+    });
+    if (!r?.token) throw new Error('2Captcha returned no Turnstile token');
+    await injectCaptchaToken(page, 'turnstile', r.token);
+    const cookie = await waitForCloudflareCookie(context, hostname, 20000);
+    if (!cookie) throw new Error('Turnstile token injected but cf_clearance did not appear');
+    return { strategy: '2captcha', cookies: { cf_clearance: cookie.value }, allCookies: [cookie] };
+  };
+
+  const strategies = {
+    wait: tryWait,
+    flaresolverr: tryFlareSolverr,
+    capsolver: tryCapSolver,
+    '2captcha': try2CaptchaTurnstile
+  };
+
+  if (strategy !== 'auto') {
+    return await strategies[strategy]();
+  }
+
+  const order = ['wait', 'flaresolverr', 'capsolver', '2captcha'];
+  const errors = [];
+  for (const name of order) {
+    try {
+      const t = Date.now();
+      console.log(`[session:${session.sessionId}] CF auto: trying "${name}"`);
+      const r = await strategies[name]();
+      console.log(`[session:${session.sessionId}] CF auto: "${name}" succeeded in ${Date.now() - t}ms`);
+      return r;
+    } catch (e) {
+      console.log(`[session:${session.sessionId}] CF auto: "${name}" failed: ${e.message}`);
+      errors.push(`${name}: ${e.message}`);
+    }
+  }
+  throw new Error(`All CF strategies failed — ${errors.join(' | ')}`);
+}
 
 const app = express();
 app.use(express.json());
@@ -273,54 +374,56 @@ async function executeStep(session, step) {
         if (!type || !CAPTCHA_TYPES.includes(type)) {
           throw new Error(`solveCaptcha: "type" must be one of ${CAPTCHA_TYPES.join(', ')}`);
         }
+        const pageUrl = url || page.url();
+        const t0 = Date.now();
+
+        // Cloudflare Challenge — special multi-strategy flow (wait / flaresolverr / capsolver / 2captcha)
+        if (type === 'cloudflare-challenge') {
+          console.log(`[session:${session.sessionId}] solveCaptcha cloudflare-challenge (strategy=${params.strategy || 'auto'}): url=${pageUrl}`);
+          const r = await solveCloudflareChallenge({ session, page, context, pageUrl, params });
+          const elapsed = Date.now() - t0;
+          if (inject) {
+            if (r.allCookies && r.allCookies.length) {
+              const cookies = r.allCookies.map(c => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain || new URL(pageUrl).hostname,
+                path: c.path || '/',
+                ...(c.expires != null ? { expires: c.expires } : {}),
+                ...(c.httpOnly != null ? { httpOnly: c.httpOnly } : {}),
+                ...(c.secure != null ? { secure: c.secure } : {}),
+                ...(c.sameSite ? { sameSite: c.sameSite } : {})
+              }));
+              await context.addCookies(cookies);
+            } else {
+              const u = new URL(pageUrl);
+              await context.addCookies([{
+                name: 'cf_clearance',
+                value: r.cookies.cf_clearance,
+                domain: u.hostname,
+                path: '/',
+                httpOnly: true,
+                secure: true,
+                sameSite: 'None'
+              }]);
+            }
+          }
+          console.log(`[session:${session.sessionId}] cloudflare-challenge solved via "${r.strategy}" in ${elapsed}ms`);
+          return {
+            solved: true,
+            type,
+            strategy: r.strategy,
+            elapsedMs: elapsed,
+            cookies: r.cookies,
+            userAgent: r.userAgent
+          };
+        }
+
+        // Token-based captchas: turnstile, recaptcha v2/v3, hcaptcha — need configured solver.
         const solver = createSolver(session.captchaConfig);
         if (!solver) {
           throw new Error('solveCaptcha: no captcha solver configured. Set CAPTCHA_API_KEY_2CAPTCHA / CAPTCHA_API_KEY_CAPSOLVER in env, or pass captchaSolver in /execute body.');
         }
-        const pageUrl = url || page.url();
-        const t0 = Date.now();
-
-        // Cloudflare Challenge has a different shape: needs proxy + UA, returns cf_clearance cookie.
-        if (type === 'cloudflare-challenge') {
-          if (solver.name !== 'capsolver') {
-            throw new Error('cloudflare-challenge is only supported by the "capsolver" provider.');
-          }
-          const proxyStr = proxyToCapsolverString(session.proxy);
-          if (!proxyStr) {
-            throw new Error('cloudflare-challenge requires the session to be created with a "proxy" — CapSolver enforces a matching proxy.');
-          }
-          const userAgent = await page.evaluate(() => navigator.userAgent);
-          console.log(`[session:${session.sessionId}] solveCaptcha cloudflare-challenge: url=${pageUrl}`);
-          const result = await solver.solve(type, { pageUrl, proxy: proxyStr, userAgent });
-          const elapsed = Date.now() - t0;
-          const clearance = result?.cookies?.cf_clearance;
-          if (!clearance) {
-            throw new Error(`CapSolver did not return cf_clearance cookie: ${JSON.stringify(result)}`);
-          }
-          if (inject) {
-            const u = new URL(pageUrl);
-            await context.addCookies([{
-              name: 'cf_clearance',
-              value: clearance,
-              domain: u.hostname,
-              path: '/',
-              httpOnly: true,
-              secure: true,
-              sameSite: 'None'
-            }]);
-          }
-          console.log(`[session:${session.sessionId}] cloudflare-challenge solved in ${elapsed}ms (cf_clearance len=${clearance.length})`);
-          return {
-            solved: true,
-            type,
-            provider: solver.name,
-            elapsedMs: elapsed,
-            cookies: { cf_clearance: clearance },
-            userAgent: result.userAgent || userAgent
-          };
-        }
-
-        // Token-based captchas: turnstile, recaptcha v2/v3, hcaptcha.
         let resolvedSiteKey = siteKey;
         if (!resolvedSiteKey) {
           resolvedSiteKey = await autoDetectSiteKey(page, type);

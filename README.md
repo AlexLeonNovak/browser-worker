@@ -167,20 +167,22 @@ Per-session proxy via Playwright's native [proxy options](https://playwright.dev
 
 ## Captcha Solving
 
-When [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)'s native anti-detection isn't enough and a captcha still appears, the worker can solve it through one of two external providers:
+When [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)'s native anti-detection isn't enough and a captcha still appears, the worker can solve it through one of three backends:
 
-- **2Captcha** — slower (human + AI), broader coverage. Good for Cloudflare Turnstile.
+- **2Captcha** — slower (human + AI), broad coverage of token-based captchas.
 - **CapSolver** — usually faster AI-only solver.
+- **FlareSolverr** — self-hosted, free Cloudflare bypass. Only handles `cloudflare-challenge`. Bundled as a sibling service in `docker-compose.yml`.
 
-Both run on a unified action — `solveCaptcha` — so you can pick the provider per request and swap when one starts under-performing.
+All run on a unified action — `solveCaptcha` — so you can pick the provider per request and swap when one starts under-performing. For `cloudflare-challenge` specifically there's also an `auto` strategy that tries free options first and only escalates to paid providers if they fail.
 
 ### Configuration
 
 Defaults from `.env`:
 ```env
-CAPTCHA_PROVIDER=2captcha           # or "capsolver"
+CAPTCHA_PROVIDER=2captcha            # "2captcha" | "capsolver" | "flaresolverr"
 CAPTCHA_API_KEY_2CAPTCHA=xxx
 CAPTCHA_API_KEY_CAPSOLVER=yyy
+FLARESOLVERR_URL=http://flaresolverr:8191
 ```
 
 Per-session override in the `/execute` body:
@@ -191,7 +193,12 @@ Per-session override in the `/execute` body:
 }
 ```
 
-If `captchaSolver` is omitted, the worker uses the ENV pair matching `CAPTCHA_PROVIDER`.
+For FlareSolverr (no key needed):
+```jsonc
+{ "captchaSolver": { "provider": "flaresolverr", "url": "http://flaresolverr:8191" } }
+```
+
+If `captchaSolver` is omitted, the worker uses ENV defaults.
 
 ### solveCaptcha Action
 
@@ -203,7 +210,9 @@ If `captchaSolver` is omitted, the worker uses the ENV pair matching `CAPTCHA_PR
 | `cdata` | optional | Cloudflare Turnstile `cData` value for Challenge pages. |
 | `score` | optional | reCAPTCHA v3 minimum score (default `0.3`). |
 | `url` | optional | Page URL passed to the solver. Defaults to the current page URL. |
-| `inject` | optional (default `true`) | Inject the token into `cf-turnstile-response` / `g-recaptcha-response` / `h-captcha-response` inputs and fire the page's `data-callback` if present. Disable to receive the raw token only. |
+| `inject` | optional (default `true`) | Inject the token / cookies back into the page and fire the `data-callback` if present. Disable to receive the raw token/cookies only. |
+| `strategy` | optional, `cloudflare-challenge` only | `"auto"` (default), `"wait"`, `"flaresolverr"`, `"capsolver"`, or `"2captcha"`. See [CF Strategies](#cloudflare-challenge-strategies). |
+| `waitTimeoutMs` | optional, `cloudflare-challenge` only | How long the `wait` strategy polls for `cf_clearance` (default `15000`). |
 
 ### Example: Cloudflare Turnstile
 
@@ -219,22 +228,25 @@ If `captchaSolver` is omitted, the worker uses the ENV pair matching `CAPTCHA_PR
 }
 ```
 
-### Example: Cloudflare Challenge ("Just a moment…")
+### Cloudflare Challenge Strategies
 
-This is the JS-challenge interstitial Cloudflare shows before letting you reach the real page. Different from Turnstile — instead of a token, the solver returns the `cf_clearance` cookie which the worker installs on the session. Then a fresh `goto` / `reload` passes through.
+The `"cloudflare-challenge"` type has four ways to obtain `cf_clearance`:
 
-**Requirements:**
-- Provider **must** be `capsolver` (2Captcha doesn't return `cf_clearance` directly).
-- The session **must** have a `proxy` — CapSolver requires the cookie to be solved from the same exit IP that will use it.
-- The session UA **must** be Chrome on Windows — CapSolver's `AntiCloudflareTask` rejects anything else. This is the default (`userAgent` param), so usually no action needed.
+| Strategy | Needs | Cost | Notes |
+|---|---|---|---|
+| `wait` | nothing | free | Polls cookies until `cf_clearance` shows up. Works for invisible / non-interactive CF challenges that Patchright passes on its own. |
+| `flaresolverr` | running FlareSolverr container | free | Hands the URL to FlareSolverr, gets `cf_clearance` + UA back. Works for most CF challenges; doesn't need a session proxy. |
+| `capsolver` | CapSolver apiKey + **session proxy** + Windows Chrome UA | paid | `AntiCloudflareTask`. Strict requirements but very reliable. |
+| `2captcha` | 2Captcha apiKey + visible Turnstile widget on the page | paid | Solves the Turnstile token via 2Captcha, injects it, then waits for the page to set `cf_clearance` itself. |
+| `auto` *(default)* | — | varies | Tries the four in this order: `wait → flaresolverr → capsolver → 2captcha`. Returns the first success and skips strategies that aren't configured. |
+
+### Example: Cloudflare Challenge — auto strategy
+
+This is the recommended setup. Cheap options fire first, paid solvers are the fallback.
 
 ```jsonc
 {
-  "proxy": {
-    "server": "http://proxy.example.com:8080",
-    "username": "user",
-    "password": "pass"
-  },
+  "proxy": { "server": "http://proxy.example.com:8080", "username": "u", "password": "p" },
   "captchaSolver": { "provider": "capsolver", "apiKey": "..." },
   "steps": [
     { "action": "goto", "params": { "url": "https://protected.example.com" } },
@@ -246,12 +258,30 @@ This is the JS-challenge interstitial Cloudflare shows before letting you reach 
 }
 ```
 
-Response from `solveCaptcha` for this type:
+### Example: free path only (wait + FlareSolverr)
+
+Useful if you don't want to spend on solvers.
+
+```jsonc
+{
+  "captchaSolver": { "provider": "flaresolverr" },
+  "steps": [
+    { "action": "goto", "params": { "url": "https://protected.example.com" } },
+    { "action": "solveCaptcha", "params": { "type": "cloudflare-challenge", "strategy": "auto" } },
+    { "action": "getContent" }
+  ]
+}
+```
+
+The `auto` strategy first waits up to 15s for the challenge to pass passively (often it does, thanks to Patchright), and only then asks FlareSolverr.
+
+### Response shape (cloudflare-challenge)
+
 ```json
 {
   "solved": true,
   "type": "cloudflare-challenge",
-  "provider": "capsolver",
+  "strategy": "flaresolverr",
   "elapsedMs": 18432,
   "cookies": { "cf_clearance": "..." },
   "userAgent": "Mozilla/5.0..."
