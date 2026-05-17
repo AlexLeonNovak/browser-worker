@@ -10,7 +10,18 @@ registerExecuteRoute(app);
 registerSessionRoutes(app);
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Worker ready on :${PORT}`));
+app.listen(PORT, () => {
+  const mask = (v) => v ? 'configured' : '—';
+  console.log(`Worker ready on :${PORT}`);
+  console.log(`[env] PROXY_SERVER=${process.env.PROXY_SERVER || '—'}`);
+  console.log(`[env] PROXY_USERNAME=${process.env.PROXY_USERNAME ? '(set)' : '—'}`);
+  console.log(`[env] PROXY_PASSWORD=${process.env.PROXY_PASSWORD ? '(set)' : '—'}`);
+  console.log(`[env] FLARESOLVERR_URL=${process.env.FLARESOLVERR_URL || 'http://flaresolverr:8191 (default)'}`);
+  console.log(`[env] CAPTCHA_PROVIDER=${process.env.CAPTCHA_PROVIDER || '2captcha (default)'}`);
+  console.log(`[env] CAPTCHA_API_KEY_2CAPTCHA=${mask(process.env.CAPTCHA_API_KEY_2CAPTCHA)}`);
+  console.log(`[env] CAPTCHA_API_KEY_CAPSOLVER=${mask(process.env.CAPTCHA_API_KEY_CAPSOLVER)}`);
+  console.log(`[env] CAPTCHA_API_KEY_ANTI_CAPTCHA=${mask(process.env.CAPTCHA_API_KEY_ANTI_CAPTCHA)}`);
+});
 
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] uncaughtException:', err);

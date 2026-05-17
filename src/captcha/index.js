@@ -9,7 +9,7 @@
  *   providers/     — one file per backend (2captcha, capsolver, anti-captcha, flaresolverr)
  */
 export { SUPPORTED_TYPES, DEFAULT_USER_AGENT } from './constants.js';
-export { proxyToCapsolverString } from './utils.js';
+export { proxyToCapsolverString, proxyToCapsolverParts } from './utils.js';
 export { resolveCaptchaConfig, createSolver } from './config.js';
 export {
   waitForCloudflareCookie,

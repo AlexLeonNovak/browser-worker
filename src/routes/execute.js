@@ -79,6 +79,7 @@ export default function registerExecuteRoute(app) {
         console.log(`[session:${session.sessionId}] result: ${step.action}`, result);
         results.push({ action: step.action, ok: true, result });
       } catch (e) {
+        console.log(`[session:${session.sessionId}] error: ${step.action} — ${e.message}`);
         results.push({ action: step.action, ok: false, error: e.message });
         error = e.message;
         if (stopOnError) break;

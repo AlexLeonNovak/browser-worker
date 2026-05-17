@@ -1,5 +1,5 @@
 import { resolveCaptchaConfig, createSolver } from './config.js';
-import { proxyToCapsolverString } from './utils.js';
+import { proxyToCapsolverParts } from './utils.js';
 import { waitForCloudflareCookie, injectCaptchaToken } from './page-helpers.js';
 
 export const CF_STRATEGY_NAMES = ['wait', 'flaresolverr', 'capsolver', '2captcha', 'anti-captcha'];
@@ -54,11 +54,11 @@ export async function solveCloudflareChallenge({ session, page, context, pageUrl
   const tryCapSolver = async () => {
     const cfg = resolveCaptchaConfig({ provider: 'capsolver' });
     if (!cfg.apiKey) throw new Error('CapSolver apiKey not configured');
-    const proxyStr = proxyToCapsolverString(session.proxy);
-    if (!proxyStr) throw new Error('CapSolver requires a session proxy');
+    const proxyParts = proxyToCapsolverParts(session.proxy);
+    if (!proxyParts) throw new Error('CapSolver requires a session proxy');
     const userAgent = await page.evaluate(() => navigator.userAgent);
     const capSolver = createSolver(cfg);
-    const r = await capSolver.solve('cloudflare-challenge', { pageUrl, proxy: proxyStr, userAgent });
+    const r = await capSolver.solve('cloudflare-challenge', { pageUrl, proxy: proxyParts, userAgent });
     if (!r?.cookies?.cf_clearance) throw new Error(`CapSolver returned no cf_clearance: ${JSON.stringify(r)}`);
     return { strategy: 'capsolver', cookies: r.cookies, userAgent: r.userAgent || userAgent };
   };

@@ -7,6 +7,26 @@ import {
 } from '../captcha/index.js';
 
 /**
+ * Cloudflare binds cf_clearance to the User-Agent it was issued for.
+ * When a solver (flaresolverr / capsolver) returns its own UA, the browser
+ * must adopt it for the cookie to survive reload — otherwise CF re-issues
+ * the challenge. setUserAgentOverride changes both navigator.userAgent and
+ * the outgoing HTTP header.
+ */
+async function syncUserAgent(session, page, userAgent) {
+  if (!userAgent) return;
+  if (session.activeUserAgent === userAgent) return;
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Network.setUserAgentOverride', { userAgent });
+    session.activeUserAgent = userAgent;
+    console.log(`[session:${session.sessionId}] UA synced → ${userAgent}`);
+  } catch (e) {
+    console.warn(`[session:${session.sessionId}] UA sync failed: ${e.message}`);
+  }
+}
+
+/**
  * Implements the `solveCaptcha` action. Two branches:
  *
  *   - cloudflare-challenge → multi-strategy flow, returns cookies
@@ -20,6 +40,9 @@ export async function solveCaptchaAction(session, params) {
     throw new Error(`solveCaptcha: "type" must be one of ${CAPTCHA_TYPES.join(', ')}`);
   }
   const pageUrl = url || page.url();
+  if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) {
+    throw new Error(`solveCaptcha: invalid pageUrl "${pageUrl}". The preceding goto probably failed (page is on about:blank). Check the previous step's error or pass an explicit "url" param.`);
+  }
   const t0 = Date.now();
 
   if (type === 'cloudflare-challenge') {
@@ -27,6 +50,10 @@ export async function solveCaptchaAction(session, params) {
     const r = await solveCloudflareChallenge({ session, page, context, pageUrl, params });
     const elapsed = Date.now() - t0;
     if (inject) {
+      // Adopt the solver's UA BEFORE adding cookies — Cloudflare validates the
+      // request UA against the one cf_clearance was issued for, so the next
+      // request (e.g. reload) must already use it.
+      await syncUserAgent(session, page, r.userAgent);
       if (r.allCookies && r.allCookies.length) {
         const cookies = r.allCookies.map(c => ({
           name: c.name,

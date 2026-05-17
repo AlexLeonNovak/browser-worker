@@ -55,9 +55,16 @@ export class CapSolverSolver {
       task = {
         type: 'AntiCloudflareTask',
         websiteURL: pageUrl,
-        proxy,
         userAgent
       };
+      // proxy can be the explicit-fields form ({ proxyType, proxyAddress, ... })
+      // or a legacy "ip:port[:user:pass]" string. Both are accepted by CapSolver,
+      // but the explicit form is preferred to avoid parser ambiguity.
+      if (typeof proxy === 'string') {
+        task.proxy = proxy;
+      } else {
+        Object.assign(task, proxy);
+      }
       if (html) task.html = html;
     } else {
       throw new Error(`Unsupported captcha type for CapSolver: ${type}`);

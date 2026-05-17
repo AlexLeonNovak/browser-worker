@@ -29,5 +29,12 @@ services:
     environment:
       LOG_LEVEL: info
       TZ: UTC
-    expose:
-      - "8191"
+      PROXY_URL: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+    # Bind to localhost only — accessible from the host (for a worker running
+    # locally via `npm start`) but not exposed to the wider network.
+    # Inside the compose network the service is still reachable as
+    # http://flaresolverr:8191
+    ports:
+      - "127.0.0.1:8191:8191"
