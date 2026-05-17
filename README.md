@@ -167,38 +167,42 @@ Per-session proxy via Playwright's native [proxy options](https://playwright.dev
 
 ## Captcha Solving
 
-When [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)'s native anti-detection isn't enough and a captcha still appears, the worker can solve it through one of three backends:
+When [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)'s native anti-detection isn't enough and a captcha still appears, the worker can solve it through one of four backends:
 
 - **2Captcha** — slower (human + AI), broad coverage of token-based captchas.
-- **CapSolver** — usually faster AI-only solver.
+- **CapSolver** — usually faster AI-only solver. Only one that returns `cf_clearance` directly (needs proxy).
+- **Anti-Captcha** — another paid API, useful as a tie-breaker when 2Captcha/CapSolver under-perform.
 - **FlareSolverr** — self-hosted, free Cloudflare bypass. Only handles `cloudflare-challenge`. Bundled as a sibling service in `docker-compose.yml`.
 
 All run on a unified action — `solveCaptcha` — so you can pick the provider per request and swap when one starts under-performing. For `cloudflare-challenge` specifically there's also an `auto` strategy that tries free options first and only escalates to paid providers if they fail.
 
 ### Configuration
 
-Defaults from `.env`:
+Defaults from `.env` (populate every key you might use — the worker picks whichever provider the request asks for):
 ```env
-CAPTCHA_PROVIDER=2captcha            # "2captcha" | "capsolver" | "flaresolverr"
+CAPTCHA_PROVIDER=2captcha            # "2captcha" | "capsolver" | "anti-captcha" | "flaresolverr"
 CAPTCHA_API_KEY_2CAPTCHA=xxx
 CAPTCHA_API_KEY_CAPSOLVER=yyy
+CAPTCHA_API_KEY_ANTI_CAPTCHA=zzz
 FLARESOLVERR_URL=http://flaresolverr:8191
 ```
 
-Per-session override in the `/execute` body:
-```jsonc
-{
-  "captchaSolver": { "provider": "capsolver", "apiKey": "zzz" },
-  "steps": [...]
-}
-```
+`CAPTCHA_PROVIDER` is only the **default** when the request body doesn't specify one. Per-request you can switch freely:
 
-For FlareSolverr (no key needed):
 ```jsonc
-{ "captchaSolver": { "provider": "flaresolverr", "url": "http://flaresolverr:8191" } }
-```
+// Use the default provider from env (2captcha here)
+{ "steps": [...] }
 
-If `captchaSolver` is omitted, the worker uses ENV defaults.
+// Switch to capsolver for this request — apiKey is picked up from
+// CAPTCHA_API_KEY_CAPSOLVER, no need to re-send it in the body.
+{ "captchaSolver": { "provider": "capsolver" }, "steps": [...] }
+
+// Override the apiKey explicitly (useful for client-supplied keys)
+{ "captchaSolver": { "provider": "capsolver", "apiKey": "zzz" }, "steps": [...] }
+
+// FlareSolverr — no apiKey, url defaults to FLARESOLVERR_URL
+{ "captchaSolver": { "provider": "flaresolverr" }, "steps": [...] }
+```
 
 ### solveCaptcha Action
 
@@ -211,8 +215,9 @@ If `captchaSolver` is omitted, the worker uses ENV defaults.
 | `score` | optional | reCAPTCHA v3 minimum score (default `0.3`). |
 | `url` | optional | Page URL passed to the solver. Defaults to the current page URL. |
 | `inject` | optional (default `true`) | Inject the token / cookies back into the page and fire the `data-callback` if present. Disable to receive the raw token/cookies only. |
-| `strategy` | optional, `cloudflare-challenge` only | `"auto"` (default), `"wait"`, `"flaresolverr"`, `"capsolver"`, or `"2captcha"`. See [CF Strategies](#cloudflare-challenge-strategies). |
+| `strategy` | optional, `cloudflare-challenge` only | `"auto"` (default), one of `"wait"` / `"flaresolverr"` / `"capsolver"` / `"2captcha"` / `"anti-captcha"`, **or** an array of those names in custom order. See [CF Strategies](#cloudflare-challenge-strategies). |
 | `waitTimeoutMs` | optional, `cloudflare-challenge` only | How long the `wait` strategy polls for `cf_clearance` (default `15000`). |
+| `widgetWaitTimeoutMs` | optional, `cloudflare-challenge` only | After injecting a Turnstile token (2Captcha / Anti-Captcha strategies), how long to wait for the page to set `cf_clearance` (default `20000`). |
 
 ### Example: Cloudflare Turnstile
 
@@ -230,15 +235,29 @@ If `captchaSolver` is omitted, the worker uses ENV defaults.
 
 ### Cloudflare Challenge Strategies
 
-The `"cloudflare-challenge"` type has four ways to obtain `cf_clearance`:
+The `"cloudflare-challenge"` type has five ways to obtain `cf_clearance`:
 
 | Strategy | Needs | Cost | Notes |
 |---|---|---|---|
 | `wait` | nothing | free | Polls cookies until `cf_clearance` shows up. Works for invisible / non-interactive CF challenges that Patchright passes on its own. |
 | `flaresolverr` | running FlareSolverr container | free | Hands the URL to FlareSolverr, gets `cf_clearance` + UA back. Works for most CF challenges; doesn't need a session proxy. |
 | `capsolver` | CapSolver apiKey + **session proxy** + Windows Chrome UA | paid | `AntiCloudflareTask`. Strict requirements but very reliable. |
-| `2captcha` | 2Captcha apiKey + visible Turnstile widget on the page | paid | Solves the Turnstile token via 2Captcha, injects it, then waits for the page to set `cf_clearance` itself. |
-| `auto` *(default)* | — | varies | Tries the four in this order: `wait → flaresolverr → capsolver → 2captcha`. Returns the first success and skips strategies that aren't configured. |
+| `2captcha` | 2Captcha apiKey + visible Turnstile widget on the page | paid | Solves the Turnstile token via 2Captcha, injects it, waits for the page to set `cf_clearance` itself. |
+| `anti-captcha` | Anti-Captcha apiKey + visible Turnstile widget on the page | paid | Same approach as 2Captcha, via Anti-Captcha's `TurnstileTaskProxyless`. Useful tie-breaker. |
+| `auto` *(default)* | — | varies | Default order: `wait → flaresolverr → capsolver → 2captcha → anti-captcha`. Returns the first success and skips strategies that aren't configured. |
+
+#### Custom strategy chain
+
+Pass an array to `strategy` to use your own order:
+
+```jsonc
+{ "action": "solveCaptcha", "params": {
+  "type": "cloudflare-challenge",
+  "strategy": ["wait", "anti-captcha", "capsolver"]   // skip flaresolverr, prefer anti-captcha over capsolver
+}}
+```
+
+Each strategy is tried in order and the first success returns. Strategies that aren't configured (no apiKey, no proxy, etc.) fail fast with a clear error and the chain continues.
 
 ### Example: Cloudflare Challenge — auto strategy
 
@@ -363,7 +382,7 @@ Basic health check showing the number of active sessions.
 - **Patchright Anti-Detection**: Patched Chromium with `Runtime.enable`/`Console.enable` leak fixes and automation flag removal — built in at native level.
 - **Per-Session Proxy**: Each session can be bound to its own HTTP/HTTPS/SOCKS5 proxy via `proxy` param.
 - **Headless / Headful**: `headless: false` runs through Xvfb inside the container for stronger anti-detection where needed.
-- **Captcha Solving**: Built-in `solveCaptcha` action with switchable backend — `2captcha` or `capsolver` — supports Cloudflare Turnstile, reCAPTCHA v2/v3, hCaptcha, and Cloudflare Challenge (`cf_clearance` cookie, CapSolver only). ENV defaults with per-session override.
+- **Captcha Solving**: Built-in `solveCaptcha` action with four switchable backends — `2captcha`, `capsolver`, `anti-captcha`, `flaresolverr` — supports Cloudflare Turnstile, reCAPTCHA v2/v3, hCaptcha, and Cloudflare Challenge (`cf_clearance` cookie) with a configurable strategy chain. ENV defaults with per-session override.
 - **Security Bypass**: Use `disableSecurity: true` to bypass SSL errors, Content Security Policy (CSP), and standard web security (SOP).
 - **HTTP Enforcement**: Use `forceHttp: true` to force the browser to stay on HTTP even if the server redirects to HTTPS.
 - **Ad & Tracker Blocking**: Use `blockAds: true` to block 50+ ad, analytics, and tracking domains. Custom patterns can be passed as an array or object.
