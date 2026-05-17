@@ -40,7 +40,7 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `ttl` | `30000` | Time-to-live in ms. Sets the worker-side expiration timer. |
 | `headless` | `true` | Run the browser headless. Set to `false` for headful via Xvfb — better stealth, more resources. |
 | `userAgent` | Windows Chrome | Per-session UA string. Defaults to Chrome 146 on Windows 10 — required by CapSolver's `AntiCloudflareTask` and a generally safe fingerprint. Override if you need a different OS/version. |
-| `proxy` | `null` | Per-session proxy object: `{ server, username?, password?, bypass? }`. See [Proxy Examples](#proxy-examples). |
+| `proxy` | env default | Per-session proxy `{ server, username?, password?, bypass? }`. Falls back to `PROXY_*` env vars when omitted. Pass `null` to opt out of the env default for one request. See [Proxy Examples](#proxy-examples). |
 | `captchaSolver` | `null` | Per-session captcha solver override: `{ provider: "2captcha"\|"capsolver", apiKey }`. Falls back to ENV defaults. See [Captcha Solving](#captcha-solving). |
 | `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
@@ -107,6 +107,16 @@ Execute one or more browser actions in a single request. Creates a new session i
 ### Proxy Examples
 
 Per-session proxy via Playwright's native [proxy options](https://playwright.dev/docs/api/class-browser#browser-new-context-option-proxy). Each session gets its own proxy — different sessions can use different proxies.
+
+You can also set a **default proxy** in `.env` — every session uses it unless the request overrides:
+```env
+PROXY_SERVER=http://proxy.example.com:8080
+PROXY_USERNAME=user
+PROXY_PASSWORD=pass
+PROXY_BYPASS=*.internal.lan,localhost
+```
+
+Resolution order: `body.proxy === null` → no proxy for this request; `body.proxy` present → use as-is; otherwise → fall back to env.
 
 ```jsonc
 // Anonymous HTTP/HTTPS proxy
@@ -398,6 +408,12 @@ Basic health check showing the number of active sessions.
 | `CAPTCHA_PROVIDER` | `2captcha` | Default solver when `captchaSolver` is not passed in body. `2captcha` or `capsolver`. |
 | `CAPTCHA_API_KEY_2CAPTCHA` | — | API key used when provider is `2captcha`. |
 | `CAPTCHA_API_KEY_CAPSOLVER` | — | API key used when provider is `capsolver`. |
+| `CAPTCHA_API_KEY_ANTI_CAPTCHA` | — | API key used when provider is `anti-captcha`. |
+| `FLARESOLVERR_URL` | `http://flaresolverr:8191` | URL of the FlareSolverr sibling service. |
+| `PROXY_SERVER` | — | Default proxy server (e.g. `http://proxy.example.com:8080`). Applied to every session unless body overrides. |
+| `PROXY_USERNAME` | — | Default proxy username. |
+| `PROXY_PASSWORD` | — | Default proxy password. |
+| `PROXY_BYPASS` | — | Default proxy bypass list, comma-separated. |
 
 ## Diagrams
 

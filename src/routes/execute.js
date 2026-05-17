@@ -1,4 +1,5 @@
 import { resolveCaptchaConfig } from '../captcha/index.js';
+import { resolveProxyConfig } from '../proxy.js';
 import { sessions, resetTimer } from '../session/manager.js';
 import { createSession } from '../session/create.js';
 import { executeStep } from '../session/execute-step.js';
@@ -14,7 +15,7 @@ export default function registerExecuteRoute(app) {
       sessionId,
       ttl,
       headless = true,
-      proxy = null,
+      proxy: bodyProxy,
       captchaSolver = null,
       userAgent,
       blockAds = false,
@@ -28,11 +29,13 @@ export default function registerExecuteRoute(app) {
 
     if (!steps.length) return res.status(400).json({ ok: false, error: 'steps required' });
 
-    if (proxy !== null) {
-      if (typeof proxy !== 'object' || !proxy.server || typeof proxy.server !== 'string') {
-        return res.status(400).json({ ok: false, error: 'proxy must be an object with a "server" string (e.g. "http://host:port")' });
+    if (bodyProxy !== null && bodyProxy !== undefined) {
+      if (typeof bodyProxy !== 'object' || !bodyProxy.server || typeof bodyProxy.server !== 'string') {
+        return res.status(400).json({ ok: false, error: 'proxy must be an object with a "server" string (e.g. "http://host:port"), or null to opt out of the env default' });
       }
     }
+
+    const proxy = resolveProxyConfig(bodyProxy);
 
     if (captchaSolver !== null) {
       if (typeof captchaSolver !== 'object') {
