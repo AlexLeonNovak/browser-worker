@@ -44,6 +44,7 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `captchaSolver` | `null` | Per-session captcha solver override: `{ provider: "2captcha"\|"capsolver", apiKey }`. Falls back to ENV defaults. See [Captcha Solving](#captcha-solving). |
 | `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
+| `interceptTurnstile` | `false` | Intercept `turnstile.render()` for **explicit-render** Turnstile widgets (the JS-mounted kind with no `data-sitekey` attribute, e.g. React/Inertia login forms). Lets `solveCaptcha { type: "turnstile" }` auto-detect the sitekey and deliver the solved token through the widget's own `callback` so framework state updates correctly. Leave **off** for Cloudflare interstitial challenges (`type: "cloudflare-challenge"`), which need the real `window.turnstile`. |
 | `forceHttp` | `false` | Force HTTP by downgrading HTTPS requests. Accepts `true` (all domains) or an array of specific hostnames (e.g., `["legacy.com"]`). URLs starting with `http://` in `goto` automatically add their hostname to the list. |
 | `addCSS` | `''` | Inject custom CSS into all pages via `<style>` tag before page load. |
 | `addJS` | `''` | Inject custom JS into all pages via `<script>` tag before page load. Use `DOMContentLoaded` listener if DOM access is needed. |
@@ -219,7 +220,7 @@ FLARESOLVERR_URL=http://flaresolverr:8191
 | Param | Required | Description |
 |-------|----------|-------------|
 | `type` | yes | `"turnstile"`, `"recaptcha-v2"`, `"recaptcha-v3"`, `"hcaptcha"`, or `"cloudflare-challenge"`. |
-| `siteKey` | optional | Site key. If omitted, the worker auto-detects from `[data-sitekey]` on the page. |
+| `siteKey` | optional | Site key. If omitted, the worker auto-detects from `[data-sitekey]` (piercing open/closed shadow roots) and, for explicit-render Turnstile with `interceptTurnstile: true`, from the captured `render()` params or the page's JS bundles. |
 | `action` | optional | Cloudflare Turnstile / reCAPTCHA v3 `action` value. |
 | `cdata` | optional | Cloudflare Turnstile `cData` value for Challenge pages. |
 | `score` | optional | reCAPTCHA v3 minimum score (default `0.3`). |
@@ -242,6 +243,36 @@ FLARESOLVERR_URL=http://flaresolverr:8191
   "ttl": 120000
 }
 ```
+
+#### Explicit-render Turnstile (no `data-sitekey`) — `interceptTurnstile`
+
+Many modern apps (React/Vue/Inertia login forms) mount Turnstile by calling
+`turnstile.render(el, { sitekey, callback })` from their JS bundle instead of using
+a `<div class="cf-turnstile" data-sitekey="...">`. There is then **no `data-sitekey`
+to auto-detect**, and the solved token must be delivered through the widget's own
+`callback` (writing the hidden input's `.value` won't update the framework's form
+state). For these, set `interceptTurnstile: true` on the session:
+
+```jsonc
+{
+  "interceptTurnstile": true,
+  "steps": [
+    { "action": "goto", "params": { "url": "https://app.example.com/login" } },
+    { "action": "wait", "params": { "ms": 4000 } },
+    { "action": "solveCaptcha", "params": { "type": "turnstile" } },
+    { "action": "fill", "params": { "selector": "input[name=username]", "value": "..." } },
+    { "action": "fill", "params": { "selector": "input[name=password]", "value": "..." } },
+    { "action": "click", "params": { "selector": "button[type=submit]" } }
+  ],
+  "ttl": 300000
+}
+```
+
+The worker shims `window.turnstile` at document-start to capture the sitekey
+(auto-detected, with a fallback that scans the page's JS bundles) and the render
+`callback`, then fires that callback with the solved token. Leave `interceptTurnstile`
+**off** for full-page Cloudflare interstitials — use `type: "cloudflare-challenge"`
+there, which relies on the real `window.turnstile`.
 
 ### Cloudflare Challenge Strategies
 

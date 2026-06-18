@@ -21,6 +21,7 @@ export default function registerExecuteRoute(app) {
       blockAds = false,
       forceHttp = false,
       disableSecurity = false,
+      interceptTurnstile = false,
       addCSS = '',
       addJS = '',
       steps = [],
@@ -54,7 +55,7 @@ export default function registerExecuteRoute(app) {
     if (!session) {
       const sessionTtl = ttl || 30000;
       try {
-        session = await createSession({ ttl: sessionTtl, headless, proxy, captchaConfig, userAgent, blockAds, forceHttp, disableSecurity, addCSS, addJS });
+        session = await createSession({ ttl: sessionTtl, headless, proxy, captchaConfig, userAgent, blockAds, forceHttp, disableSecurity, interceptTurnstile, addCSS, addJS });
       } catch (err) {
         return res.status(503).json({ ok: false, error: err.message });
       }

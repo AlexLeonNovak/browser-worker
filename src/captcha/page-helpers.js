@@ -48,6 +48,30 @@ export async function autoDetectSiteKey(page, type) {
     const siteKey = await loc.first().getAttribute('data-sitekey');
     if (siteKey) return siteKey;
   }
+  if (type === TURNSTILE) {
+    // 1) explicit-render widget captured by the interceptTurnstile shim, mirrored
+    //    onto a hidden DOM node (readable from the isolated evaluate world).
+    const fromBridge = await page.evaluate(() => {
+      const el = document.getElementById('__cf_turnstile_bridge');
+      return el ? (el.getAttribute('data-sitekey') || null) : null;
+    });
+    if (fromBridge) return fromBridge;
+    // 2) fallback: scan same-origin JS bundles for a Turnstile sitekey literal
+    //    (the sitekey passed to turnstile.render() is a static string in the build).
+    const fromScripts = await page.evaluate(async () => {
+      const srcs = [...document.querySelectorAll('script[src]')]
+        .map(s => s.src).filter(s => s.startsWith(location.origin));
+      for (const u of srcs) {
+        try {
+          const t = await fetch(u).then(r => r.text());
+          const m = t.match(/0x4[A-Za-z0-9]{8,}/);
+          if (m) return m[0];
+        } catch (e) { /* ignore unreachable bundle */ }
+      }
+      return null;
+    });
+    if (fromScripts) return fromScripts;
+  }
   return null;
 }
 
@@ -76,6 +100,18 @@ async function injectInto(page, responseSelector, widgetSelector, token) {
 export async function injectCaptchaToken(page, type, token) {
   if (type === TURNSTILE) {
     await injectInto(page, '[name="cf-turnstile-response"]', '.cf-turnstile', token);
+    // Explicit-render widgets deliver the token through the render() callback (no
+    // data-callback attribute), which usually drives framework state. The callback
+    // lives in the page MAIN world, unreachable from the isolated evaluate world, so
+    // fire it via a <script> bridge that runs in the main world.
+    await page.evaluate((t) => {
+      const s = document.createElement('script');
+      s.textContent =
+        '(function(){try{var st=window.__cfTurnstile;if(st){st.token=' + JSON.stringify(t) +
+        ';if(st.params&&typeof st.params.callback==="function"){st.params.callback(' + JSON.stringify(t) + ');}}}catch(e){}})();';
+      (document.head || document.documentElement).appendChild(s);
+      s.remove();
+    }, token);
     return;
   }
   if (type === RECAPTCHA_V2 || type === RECAPTCHA_V3) {

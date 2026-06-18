@@ -1,6 +1,7 @@
 import { chromium } from 'patchright';
 import { randomUUID } from 'crypto';
 import { DEFAULT_USER_AGENT } from '../captcha/index.js';
+import { turnstileInterceptInit } from '../captcha/turnstile-intercept.js';
 import { sessions, resetTimer } from './manager.js';
 
 /**
@@ -17,6 +18,7 @@ export async function createSession(options = {}) {
     blockAds = false,
     forceHttp = false,
     disableSecurity = false,
+    interceptTurnstile = false,
     addCSS = '',
     addJS = ''
   } = options;
@@ -60,6 +62,12 @@ export async function createSession(options = {}) {
     ...(proxy ? { proxy } : {})
   });
 
+  // Must be injected before the page's own scripts run so the shim is in place
+  // when the site calls turnstile.render(). addInitScript runs at document-start.
+  if (interceptTurnstile) {
+    await context.addInitScript(turnstileInterceptInit);
+  }
+
   if (addCSS) {
     await context.addInitScript(({ css }) => {
       const style = document.createElement('style');
@@ -81,7 +89,7 @@ export async function createSession(options = {}) {
   // Normalize forceHttp: true = all domains, array = only these domains
   const forceHttpHosts = Array.isArray(forceHttp) ? new Set(forceHttp) : new Set();
 
-  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts, captchaConfig, proxy };
+  const sessionObj = { sessionId, browser, context, page, ttl, blockAds, forceHttp, forceHttpHosts, captchaConfig, proxy, interceptTurnstile };
   sessions.set(sessionId, sessionObj);
   resetTimer(sessionId);
 
