@@ -298,7 +298,7 @@ The `httpRequest` action runs `fetch()` **inside the same browser context** that
       "action": "httpRequest",
       "params": {
         "method": "POST",
-        "url": "https://fastiptv.cc/api/login",
+        "url": "https://example.com/api/login",
         "headers": { "Content-Type": "application/json" },
         "body": { "username": "x", "password": "y" },
         "responseType": "json"
@@ -321,7 +321,7 @@ Response:
       "statusText": "OK",
       "headers": { "content-type": "application/json", ... },
       "body": { "token": "..." },
-      "finalUrl": "https://fastiptv.cc/api/login"
+      "finalUrl": "https://example.com/api/login"
     }
   }]
 }
