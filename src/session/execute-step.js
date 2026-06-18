@@ -1,5 +1,6 @@
 import { setupRoutes } from './route-interceptor.js';
 import { solveCaptchaAction } from './solve-captcha-action.js';
+import { httpRequestAction } from './http-request-action.js';
 
 /**
  * Dispatches a single step to the matching browser action.
@@ -29,8 +30,55 @@ export async function executeStep(session, step) {
       return { url: page.url() };
     case 'getUrl':
       return { url: page.url() };
-    case 'getContent':
-      return { html: await page.content() };
+    case 'getContent': {
+      if (!params.shadow) return { html: await page.content() };
+      // shadow:true — serialize open shadow roots inline as declarative shadow DOM
+      // (<template shadowrootmode>). Closed roots are invisible to page-side JS and
+      // are NOT included unless pierceShadow force-opens them; patchright's
+      // locator-level closed-root piercing does not apply to this in-page serialize.
+      const html = await page.evaluate(() => {
+        const collect = (root) => {
+          const roots = [];
+          const walk = (node) => {
+            const els = node.querySelectorAll ? node.querySelectorAll('*') : [];
+            for (const el of els) {
+              if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+            }
+          };
+          walk(root);
+          return roots;
+        };
+        const doc = document.documentElement;
+        // Native getHTML (Chrome 125+) serializes the passed shadow roots correctly,
+        // including nested ones, as <template shadowrootmode="open">.
+        if (typeof doc.getHTML === 'function') {
+          return '<!DOCTYPE html>\n' + doc.getHTML({ shadowRoots: collect(document) });
+        }
+        // Fallback for older engines: manual recursive serialization (open roots only).
+        const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const serChildren = (node) => {
+          let out = '';
+          for (const child of node.childNodes) {
+            if (child.nodeType === 3) out += esc(child.nodeValue);
+            else if (child.nodeType === 8) out += '<!--' + child.nodeValue + '-->';
+            else if (child.nodeType === 1) out += serEl(child);
+          }
+          return out;
+        };
+        const serEl = (el) => {
+          const tag = el.localName;
+          let attrs = '';
+          for (const a of el.attributes) attrs += ' ' + a.name + '="' + esc(a.value) + '"';
+          let out = '<' + tag + attrs + '>';
+          if (el.shadowRoot) out += '<template shadowrootmode="open">' + serChildren(el.shadowRoot) + '</template>';
+          if (VOID.has(tag)) return out;
+          return out + serChildren(el) + '</' + tag + '>';
+        };
+        return '<!DOCTYPE html>\n' + serEl(doc);
+      });
+      return { html };
+    }
     case 'click':
       await page.click(params.selector, { timeout: params.timeout ?? 30000 });
       return { clicked: params.selector };
@@ -86,6 +134,8 @@ export async function executeStep(session, step) {
       return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
     case 'solveCaptcha':
       return await solveCaptchaAction(session, params);
+    case 'httpRequest':
+      return await httpRequestAction(session, params);
     default:
       if (typeof page[action] === 'function') {
         const result = await page[action](params);

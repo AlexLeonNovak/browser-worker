@@ -69,16 +69,22 @@ export async function solveCloudflareChallenge({ session, page, context, pageUrl
   const tryTurnstileWidget = async (providerName) => {
     const cfg = resolveCaptchaConfig({ provider: providerName });
     if (!cfg.apiKey) throw new Error(`${providerName} apiKey not configured`);
-    const widget = await page.evaluate(() => {
-      const el = document.querySelector('.cf-turnstile[data-sitekey]')
-        || document.querySelector('[data-sitekey]');
-      if (!el) return null;
-      return {
-        siteKey: el.getAttribute('data-sitekey'),
-        action: el.getAttribute('data-action') || undefined,
-        cdata: el.getAttribute('data-cdata') || undefined
+    // Locator-based detection so the widget is found even inside a (closed)
+    // shadow root — raw document.querySelector in page.evaluate pierces neither.
+    let widget = null;
+    for (const sel of ['.cf-turnstile[data-sitekey]', '[data-sitekey]']) {
+      const loc = page.locator(sel);
+      if (await loc.count() === 0) continue;
+      const el = loc.first();
+      const siteKey = await el.getAttribute('data-sitekey');
+      if (!siteKey) continue;
+      widget = {
+        siteKey,
+        action: (await el.getAttribute('data-action')) || undefined,
+        cdata: (await el.getAttribute('data-cdata')) || undefined
       };
-    });
+      break;
+    }
     if (!widget?.siteKey) {
       throw new Error(`No Turnstile widget on page — ${providerName} strategy only works for interactive CF challenges`);
     }

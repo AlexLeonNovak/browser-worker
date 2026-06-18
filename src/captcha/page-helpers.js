@@ -23,34 +23,50 @@ export async function waitForCloudflareCookie(context, hostname, timeoutMs = 200
   return null;
 }
 
+// Selector priority lists per captcha type. We resolve them through Playwright
+// locators (not page.evaluate(document.querySelector)), so patchright pierces
+// both OPEN and CLOSED shadow roots — raw in-page querySelector pierces neither.
+const SITEKEY_SELECTORS = {
+  [TURNSTILE]: ['.cf-turnstile[data-sitekey]', 'div[data-sitekey][data-action]', '[data-sitekey]'],
+  [RECAPTCHA_V2]: ['.g-recaptcha[data-sitekey]', '[data-sitekey]'],
+  [RECAPTCHA_V3]: ['.g-recaptcha[data-sitekey]', '[data-sitekey]'],
+  [HCAPTCHA]: ['.h-captcha[data-sitekey]', '[data-sitekey]']
+};
+
 /**
  * Auto-detect siteKey from the page's DOM for a given captcha type.
  * Returns null if nothing matches — caller should fall back to an explicit siteKey.
+ * Locator-based so it sees widgets inside (open or closed) shadow roots.
  */
 export async function autoDetectSiteKey(page, type) {
-  if (type === TURNSTILE) {
-    return await page.evaluate(() => {
-      const el = document.querySelector('.cf-turnstile[data-sitekey]')
-        || document.querySelector('div[data-sitekey][data-action]')
-        || document.querySelector('[data-sitekey]');
-      return el ? el.getAttribute('data-sitekey') : null;
-    });
-  }
-  if (type === RECAPTCHA_V2 || type === RECAPTCHA_V3) {
-    return await page.evaluate(() => {
-      const el = document.querySelector('.g-recaptcha[data-sitekey]')
-        || document.querySelector('[data-sitekey]');
-      return el ? el.getAttribute('data-sitekey') : null;
-    });
-  }
-  if (type === HCAPTCHA) {
-    return await page.evaluate(() => {
-      const el = document.querySelector('.h-captcha[data-sitekey]')
-        || document.querySelector('[data-sitekey]');
-      return el ? el.getAttribute('data-sitekey') : null;
-    });
+  const selectors = SITEKEY_SELECTORS[type];
+  if (!selectors) return null;
+  for (const sel of selectors) {
+    const loc = page.locator(sel);
+    // count() never auto-waits, so a missing preferred selector doesn't stall on a timeout.
+    if (await loc.count() === 0) continue;
+    const siteKey = await loc.first().getAttribute('data-sitekey');
+    if (siteKey) return siteKey;
   }
   return null;
+}
+
+// Write `token` into every matching response field, then fire each widget's
+// data-callback. evaluateAll runs on the locator's resolved element set, so
+// (via patchright) it reaches fields/widgets inside open or closed shadow roots.
+async function injectInto(page, responseSelector, widgetSelector, token) {
+  await page.locator(responseSelector).evaluateAll(
+    (els, t) => els.forEach(el => { el.value = t; }),
+    token
+  );
+  await page.locator(widgetSelector).evaluateAll((els, t) => {
+    els.forEach(el => {
+      const cb = el.getAttribute('data-callback');
+      if (cb && typeof window[cb] === 'function') {
+        try { window[cb](t); } catch {}
+      }
+    });
+  }, token);
 }
 
 /**
@@ -59,40 +75,20 @@ export async function autoDetectSiteKey(page, type) {
  */
 export async function injectCaptchaToken(page, type, token) {
   if (type === TURNSTILE) {
-    await page.evaluate((t) => {
-      document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => { el.value = t; });
-      document.querySelectorAll('.cf-turnstile').forEach(el => {
-        const cb = el.getAttribute('data-callback');
-        if (cb && typeof window[cb] === 'function') {
-          try { window[cb](t); } catch {}
-        }
-      });
-    }, token);
+    await injectInto(page, '[name="cf-turnstile-response"]', '.cf-turnstile', token);
     return;
   }
   if (type === RECAPTCHA_V2 || type === RECAPTCHA_V3) {
-    await page.evaluate((t) => {
-      document.querySelectorAll('[name="g-recaptcha-response"], #g-recaptcha-response').forEach(el => { el.value = t; });
-      document.querySelectorAll('textarea#g-recaptcha-response').forEach(el => { el.value = t; });
-      document.querySelectorAll('.g-recaptcha').forEach(el => {
-        const cb = el.getAttribute('data-callback');
-        if (cb && typeof window[cb] === 'function') {
-          try { window[cb](t); } catch {}
-        }
-      });
-    }, token);
+    await injectInto(
+      page,
+      '[name="g-recaptcha-response"], #g-recaptcha-response, textarea#g-recaptcha-response',
+      '.g-recaptcha',
+      token
+    );
     return;
   }
   if (type === HCAPTCHA) {
-    await page.evaluate((t) => {
-      document.querySelectorAll('[name="h-captcha-response"], [name="g-recaptcha-response"]').forEach(el => { el.value = t; });
-      document.querySelectorAll('.h-captcha').forEach(el => {
-        const cb = el.getAttribute('data-callback');
-        if (cb && typeof window[cb] === 'function') {
-          try { window[cb](t); } catch {}
-        }
-      });
-    }, token);
+    await injectInto(page, '[name="h-captcha-response"], [name="g-recaptcha-response"]', '.h-captcha', token);
     return;
   }
   throw new Error(`Cannot inject token for unknown captcha type: ${type}`);

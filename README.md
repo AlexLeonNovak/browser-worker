@@ -250,8 +250,8 @@ The `"cloudflare-challenge"` type has five ways to obtain `cf_clearance`:
 | Strategy | Needs | Cost | Notes |
 |---|---|---|---|
 | `wait` | nothing | free | Polls cookies until `cf_clearance` shows up. Works for invisible / non-interactive CF challenges that Patchright passes on its own. |
-| `flaresolverr` | running FlareSolverr container | free | Hands the URL to FlareSolverr, gets `cf_clearance` + UA back. Works for most CF challenges; doesn't need a session proxy. |
-| `capsolver` | CapSolver apiKey + **session proxy** + Windows Chrome UA | paid | `AntiCloudflareTask`. Strict requirements but very reliable. |
+| `flaresolverr` | running FlareSolverr container | free | Hands the URL to FlareSolverr, gets `cf_clearance` + UA back. Works for most CF challenges; doesn't need a session proxy. **⚠ See "Cookie portability" below.** |
+| `capsolver` | CapSolver apiKey + **session proxy** + Windows Chrome UA | paid | `AntiCloudflareTask`. Strict requirements but very reliable. Cookie is issued for **your** UA + proxy IP, so it's portable to downstream HTTP clients (n8n HTTP node, curl, etc.) — preferred when the goal is to feed cookies outside the browser. |
 | `2captcha` | 2Captcha apiKey + visible Turnstile widget on the page | paid | Solves the Turnstile token via 2Captcha, injects it, waits for the page to set `cf_clearance` itself. |
 | `anti-captcha` | Anti-Captcha apiKey + visible Turnstile widget on the page | paid | Same approach as 2Captcha, via Anti-Captcha's `TurnstileTaskProxyless`. Useful tie-breaker. |
 | `auto` *(default)* | — | varies | Default order: `wait → flaresolverr → capsolver → 2captcha → anti-captcha`. Returns the first success and skips strategies that aren't configured. |
@@ -268,6 +268,78 @@ Pass an array to `strategy` to use your own order:
 ```
 
 Each strategy is tried in order and the first success returns. Strategies that aren't configured (no apiKey, no proxy, etc.) fail fast with a clear error and the chain continues.
+
+#### Cookie portability — why strategy choice matters for downstream HTTP calls
+
+Cloudflare binds `cf_clearance` to the **(IP, UA, TLS fingerprint)** of the client that solved the challenge, not just to the cookie value.
+
+| Strategy | Cookie issued for | Portable to a separate HTTP client (n8n HTTP node, curl, axios)? |
+|---|---|---|
+| `wait` | your browser session | ✅ — same UA + same proxy IP |
+| `capsolver` | your UA + session proxy IP (you pass them in) | ✅ — same as above |
+| `flaresolverr` | **FlareSolverr's** Linux Chrome UA + its TLS | ⚠ Only works if the next request **also** matches FlareSolverr's UA, comes through the same IP, **and** the consumer can produce a Chrome-like TLS fingerprint (Node's default TLS is detectable and usually rejected). |
+| `2captcha` / `anti-captcha` | your browser session (token is injected, page issues cookie itself) | ✅ |
+
+For pure browser-worker workflows the worker auto-handles UA-sync via CDP, so any strategy works. But if you plan to pass `cf_clearance` to an **n8n HTTP node**, a Python `requests`, or any other non-browser client — **prefer `capsolver`** (or `wait` / token-widget strategies). FlareSolverr cookies tend to be rejected by the host page on the second request unless you also impersonate Chrome's TLS, which most HTTP libraries can't do out of the box.
+
+> **Even with `capsolver`, an external HTTP client may still be rejected** because Cloudflare also validates the TLS / HTTP-2 fingerprint of the connection, and Node.js / Python TLS stacks look nothing like Chrome. The reliable workaround is to make follow-up calls through the worker itself via the [`httpRequest` action](#calling-protected-apis-after-solving-cf--httprequest-action) — that way the request leaves the container as actual Chrome traffic.
+
+### Calling protected APIs after solving CF — `httpRequest` action
+
+A solved `cf_clearance` is bound to the **TLS / HTTP-2 fingerprint** of the browser that solved it, not just to the cookie value. Passing the cookie to an n8n HTTP Request node (or any Node.js / Python HTTP library) usually still gets blocked, because the request's JA3 fingerprint reveals it's not Chrome.
+
+The `httpRequest` action runs `fetch()` **inside the same browser context** that solved the challenge — same TLS, same cookies, same UA — so Cloudflare can't tell it apart from a normal page request.
+
+```jsonc
+{
+  "sessionId": "<existing session that already solved CF>",
+  "steps": [
+    {
+      "action": "httpRequest",
+      "params": {
+        "method": "POST",
+        "url": "https://fastiptv.cc/api/login",
+        "headers": { "Content-Type": "application/json" },
+        "body": { "username": "x", "password": "y" },
+        "responseType": "json"
+      }
+    }
+  ]
+}
+```
+
+Response:
+```jsonc
+{
+  "ok": true,
+  "results": [{
+    "action": "httpRequest",
+    "ok": true,
+    "result": {
+      "status": 200,
+      "ok": true,
+      "statusText": "OK",
+      "headers": { "content-type": "application/json", ... },
+      "body": { "token": "..." },
+      "finalUrl": "https://fastiptv.cc/api/login"
+    }
+  }]
+}
+```
+
+**Params:**
+
+| Param | Default | Description |
+|---|---|---|
+| `url` | required | Absolute http(s) URL. |
+| `method` | `"GET"` | Any HTTP verb. |
+| `headers` | `{}` | Object — case as you want it sent. |
+| `body` | — | String passed through verbatim, **or** an object (JSON-stringified automatically + `Content-Type` set if absent). |
+| `credentials` | `"include"` | `"include"` keeps the session cookies; `"omit"` runs without them. |
+| `responseType` | `"text"` | `"text"` → `body` is a string; `"json"` → parsed object. |
+| `timeoutMs` | `30000` | Aborts via AbortController. |
+
+**Why this works where n8n HTTP node doesn't:** the request leaves the container as **real Chrome traffic** (Chrome handles the TLS handshake, HTTP/2 framing, header ordering). Cloudflare sees the same fingerprint that received the cookie, so it lets the request through.
 
 ### Example: Cloudflare Challenge — auto strategy
 
@@ -353,7 +425,7 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 | `goto` | `{ url, waitUntil?, timeout? }` | `{ url }` |
 | `reload` | `{ waitUntil? }` | `{ url }` |
 | `getUrl` | — | `{ url }` |
-| `getContent` | — | `{ html }` |
+| `getContent` | `{ shadow? }` | `{ html }` |
 | `click` | `{ selector, timeout? }` | `{ clicked }` |
 | `fill` | `{ selector, value }` | `{ filled }` |
 | `type` | `{ selector, text, delay? }` | `{ typed }` |
@@ -372,6 +444,9 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 | `setCookies` | `{ cookies }` | `{ set }` |
 | `getLocalStorage` | `{ key }` | `{ value }` |
 | `solveCaptcha` | `{ type, siteKey?, action?, cdata?, score?, url?, inject? }` | `{ solved, type, provider, elapsedMs, tokenLength, token }` |
+| `httpRequest` | `{ url, method?, headers?, body?, credentials?, responseType?, timeoutMs? }` | `{ status, ok, statusText, headers, body, finalUrl }` |
+
+> **Shadow DOM.** Selector-based actions (`click`, `fill`, `getText`, `getAttribute`, …) already reach into shadow roots: Playwright pierces **open** roots and patchright additionally pierces **closed** ones at the driver level — no extra option needed. `getContent` is the exception: `page.content()` does not serialize shadow trees, so pass `{ "shadow": true }` to inline every **open** shadow root as declarative shadow DOM (`<template shadowrootmode="open">…</template>`). Closed roots are invisible to page-side serialization and are omitted.
 
 ### GET /sessions
 List all active sessions with their current URLs and stored TTL values.
