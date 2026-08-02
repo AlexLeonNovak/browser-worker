@@ -75,14 +75,26 @@ export async function httpRequestAction(session, params) {
         finalUrl: res.url
       };
     } catch (e) {
-      return { __error: e.name === 'AbortError' ? `timeout after ${timeoutMs}ms` : e.message };
+      let crossOrigin = false;
+      try { crossOrigin = new URL(url, location.href).origin !== location.origin; } catch {}
+      return {
+        __error: e.name === 'AbortError' ? `timeout after ${timeoutMs}ms` : e.message,
+        __crossOrigin: crossOrigin,
+        __pageOrigin: location.origin
+      };
     } finally {
       clearTimeout(timer);
     }
   }, { url, method, headers: finalHeaders, body: normalizedBody, credentials, responseType, timeoutMs });
 
   if (result && result.__error) {
-    throw new Error(`httpRequest failed: ${result.__error}`);
+    // "Failed to fetch" is all the browser tells the page about a CORS refusal.
+    // The most common cause here is credentials: "include" against an API that
+    // does not return Access-Control-Allow-Credentials, so say so.
+    const corsHint = /failed to fetch/i.test(result.__error) && result.__crossOrigin
+      ? ` — cross-origin from ${result.__pageOrigin}, and the browser gave no reason. Check the API's CORS policy allows this origin and the headers you sent; with credentials:"${credentials}" it must also return Access-Control-Allow-Credentials: true. Token-gated APIs usually want credentials:"omit".`
+      : '';
+    throw new Error(`httpRequest failed: ${result.__error}${corsHint}`);
   }
 
   console.log(`[session:${session.sessionId}] httpRequest ${method} ${url} → ${result.status} in ${Date.now() - t0}ms`);

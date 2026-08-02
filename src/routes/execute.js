@@ -6,6 +6,9 @@ import { executeStep } from '../session/execute-step.js';
 
 const VALID_PROVIDERS = ['2captcha', 'capsolver', 'anti-captcha', 'flaresolverr'];
 
+// Each session is a browser context; a careless caller would otherwise OOM the box.
+const MAX_SESSIONS = Number(process.env.MAX_SESSIONS || 5);
+
 /**
  * POST /execute — create-or-reuse a session, run a list of step actions, return results.
  */
@@ -22,6 +25,7 @@ export default function registerExecuteRoute(app) {
       forceHttp = false,
       disableSecurity = false,
       interceptTurnstile = false,
+      storageState = null,
       addCSS = '',
       addJS = '',
       steps = [],
@@ -53,13 +57,22 @@ export default function registerExecuteRoute(app) {
     if (sessionId && !session) return res.status(404).json({ ok: false, error: 'Session expired' });
 
     if (!session) {
+      // Reusing an existing session never hits the cap — a long run must not get
+      // a 429 halfway through just because someone else started one.
+      if (sessions.size >= MAX_SESSIONS) {
+        res.set('Retry-After', '30');
+        return res.status(429).json({ ok: false, error: `max concurrent sessions reached (${MAX_SESSIONS})` });
+      }
       const sessionTtl = ttl || 30000;
       try {
-        session = await createSession({ ttl: sessionTtl, headless, proxy, captchaConfig, userAgent, blockAds, forceHttp, disableSecurity, interceptTurnstile, addCSS, addJS });
+        session = await createSession({ ttl: sessionTtl, headless, proxy, captchaConfig, userAgent, blockAds, forceHttp, disableSecurity, interceptTurnstile, storageState, addCSS, addJS });
       } catch (err) {
         return res.status(503).json({ ok: false, error: err.message });
       }
     } else {
+      if (storageState) {
+        console.log(`[session:${session.sessionId}] storageState ignored — it only applies when a context is created`);
+      }
       if (ttl) {
         session.ttl = ttl;
         console.log(`[session:${session.sessionId}] TTL updated to ${ttl}ms`);

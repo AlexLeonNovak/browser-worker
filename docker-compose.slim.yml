@@ -1,21 +1,24 @@
-# Full stack — worker + FlareSolverr sidecar. For a box without the headroom for
-# both (or a site with no Cloudflare challenge), use docker-compose.slim.yml.
+# Worker only — no flaresolverr sidecar.
+#
+# This is the deployment file: a 4 GB droplet cannot honour the full stack's
+# memory numbers, and the sidecar only earns its keep against Cloudflare-challenged
+# sites. Use docker-compose.yml when you actually need FlareSolverr.
+#
+#   docker compose -f docker-compose.slim.yml up -d
 services:
   browser-worker:
     build: .
     container_name: browser-worker
     restart: unless-stopped
     platform: linux/amd64          # Chrome is installed from the amd64 .deb — do not provision ARM
-    shm_size: ${SHM_SIZE:-2gb}
-    mem_limit: ${MEM_LIMIT:-6g}
-    depends_on:
-      - flaresolverr
+    shm_size: ${SHM_SIZE:-1gb}
+    mem_limit: ${MEM_LIMIT:-3g}
     environment:
       WORKER_TOKEN: ${WORKER_TOKEN:-}
       MAX_SESSIONS: ${MAX_SESSIONS:-5}
       BROWSER_IDLE_MS: ${BROWSER_IDLE_MS:-60000}
       SHUTDOWN_GRACE_MS: ${SHUTDOWN_GRACE_MS:-15000}
-      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191}
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-}
       CAPTCHA_PROVIDER: ${CAPTCHA_PROVIDER:-2captcha}
       CAPTCHA_API_KEY_2CAPTCHA: ${CAPTCHA_API_KEY_2CAPTCHA:-}
       CAPTCHA_API_KEY_CAPSOLVER: ${CAPTCHA_API_KEY_CAPSOLVER:-}
@@ -26,22 +29,11 @@ services:
       PROXY_BYPASS: ${PROXY_BYPASS:-}
     ports:
       - ${PORT:-3001}:${PORT:-3001}
+    healthcheck:
+      # /health is exempt from WORKER_TOKEN so this works on a protected worker.
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-3001}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     stop_grace_period: 30s          # must exceed SHUTDOWN_GRACE_MS so draining can finish
-
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
-    restart: unless-stopped
-    platform: linux/amd64
-    environment:
-      LOG_LEVEL: info
-      TZ: UTC
-      PROXY_URL: ${PROXY_SERVER:-}
-      PROXY_USERNAME: ${PROXY_USERNAME:-}
-      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
-    # Bind to localhost only — accessible from the host (for a worker running
-    # locally via `npm start`) but not exposed to the wider network.
-    # Inside the compose network the service is still reachable as
-    # http://flaresolverr:8191
-    ports:
-      - "127.0.0.1:8191:8191"

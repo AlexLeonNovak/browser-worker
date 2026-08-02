@@ -1,6 +1,7 @@
 import { setupRoutes } from './route-interceptor.js';
 import { solveCaptchaAction } from './solve-captcha-action.js';
 import { httpRequestAction } from './http-request-action.js';
+import { armCapture, getCaptured } from './request-capture.js';
 
 /**
  * Dispatches a single step to the matching browser action.
@@ -132,6 +133,22 @@ export async function executeStep(session, step) {
       return { set: params.cookies.length };
     case 'getLocalStorage':
       return { value: await page.evaluate((k) => localStorage.getItem(k), params.key) };
+    case 'getSessionStorage':
+      // storageState never carries sessionStorage — Playwright does not serialize
+      // it — so a site that keeps its token there needs this exported separately.
+      // Storage is per-origin: run this only once the page is ON that origin.
+      return { value: await page.evaluate(() => Object.fromEntries(Object.keys(sessionStorage).map((k) => [k, sessionStorage.getItem(k)]))) };
+    case 'setSessionStorage':
+      await page.evaluate((d) => { for (const k of Object.keys(d)) sessionStorage.setItem(k, d[k]); }, params.value ?? {});
+      return { set: Object.keys(params.value ?? {}).length };
+    case 'getStorageState':
+      // Cookies + localStorage, and indexedDB on request. sessionStorage is never
+      // included — Playwright does not serialize it.
+      return { storageState: await context.storageState(params.indexedDB ? { indexedDB: true } : undefined) };
+    case 'captureRequests':
+      return armCapture(session, params);
+    case 'getCapturedRequests':
+      return getCaptured(session);
     case 'solveCaptcha':
       return await solveCaptchaAction(session, params);
     case 'httpRequest':

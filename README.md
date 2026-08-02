@@ -19,12 +19,28 @@ Client ──REST──► browser-worker ──Patchright──► Chromium
 # 1. Copy .env.example → .env (optional)
 cp .env.example .env
 
-# 2. Start
+# 2. Start — full stack (worker + FlareSolverr)
 docker compose up -d --build
+
+# …or worker only, which is what a small box wants
+docker compose -f docker-compose.slim.yml up -d --build
 
 # 3. Verify
 curl http://localhost:3001/health
 ```
+
+## Authentication
+
+Set `WORKER_TOKEN` and every endpoint except `GET /health` requires it:
+
+```bash
+curl -H "x-worker-token: $WORKER_TOKEN" http://localhost:3001/sessions
+# Authorization: Bearer <token> works too
+```
+
+A wrong or missing token gets `401 {"ok": false, "error": "unauthorized"}`. `/health` stays open so container healthchecks work without the secret.
+
+**Leave `WORKER_TOKEN` blank only on a laptop.** `/execute` accepts `evaluate` (arbitrary JS in the page) and `httpRequest` (arbitrary fetch from inside the browser, carrying its cookie jar and its proxy). Whoever reaches the port controls that browser, your proxy, and your captcha balance. When the variable is unset the worker serves everyone and prints a warning banner at boot.
 
 ## REST API
 
@@ -45,9 +61,10 @@ Execute one or more browser actions in a single request. Creates a new session i
 | `blockAds` | `false` | Block ads and trackers. Accepts `true` (default 50+ patterns), an array (extends defaults), or an object `{ useDefaults?: boolean, custom?: string[] }`. |
 | `disableSecurity` | `false` | Disable web security, ignore SSL errors, and bypass CSP. |
 | `interceptTurnstile` | `false` | Intercept `turnstile.render()` for **explicit-render** Turnstile widgets (the JS-mounted kind with no `data-sitekey` attribute, e.g. React/Inertia login forms). Lets `solveCaptcha { type: "turnstile" }` auto-detect the sitekey and deliver the solved token through the widget's own `callback` so framework state updates correctly. Leave **off** for Cloudflare interstitial challenges (`type: "cloudflare-challenge"`), which need the real `window.turnstile`. |
-| `forceHttp` | `false` | Force HTTP by downgrading HTTPS requests. Accepts `true` (all domains) or an array of specific hostnames (e.g., `["legacy.com"]`). URLs starting with `http://` in `goto` automatically add their hostname to the list. |
+| `forceHttp` | `false` | Force HTTP by downgrading HTTPS requests. Accepts `true` (all domains) or an array of specific hostnames (e.g., `["legacy.com"]`). URLs starting with `http://` in `goto` automatically add their hostname to the list. Also sends `Upgrade-Insecure-Requests: 0`, which is **only** done when this is on: that header is not CORS-safelisted, so sending it always would force a preflight on every cross-origin XHR and break APIs whose CORS policy does not list it. |
+| `storageState` | `null` | Cookies + localStorage to restore into a new session, as returned by the `getStorageState` action. Applies at context creation only — passing it with an existing `sessionId` does nothing. See [Reusing a login](#reusing-a-login--storagestate). |
 | `addCSS` | `''` | Inject custom CSS into all pages via `<style>` tag before page load. |
-| `addJS` | `''` | Inject custom JS into all pages via `<script>` tag before page load. Use `DOMContentLoaded` listener if DOM access is needed. |
+| `addJS` | `''` | Inject custom JS into all pages via `<script>` tag before page load. Use `DOMContentLoaded` listener if DOM access is needed. **A site's Content-Security-Policy will block the inline script, silently** — pair it with `disableSecurity: true` (which sets `bypassCSP`), or use an action instead where one exists. |
 | `steps` | `[]` | Array of actions to execute. |
 | `stopOnError` | `true` | Stop execution if a step fails. |
 
@@ -366,11 +383,13 @@ Response:
 | `method` | `"GET"` | Any HTTP verb. |
 | `headers` | `{}` | Object — case as you want it sent. |
 | `body` | — | String passed through verbatim, **or** an object (JSON-stringified automatically + `Content-Type` set if absent). |
-| `credentials` | `"include"` | `"include"` keeps the session cookies; `"omit"` runs without them. |
+| `credentials` | `"include"` | `"include"` keeps the session cookies; `"omit"` runs without them. See the cross-origin note below. |
 | `responseType` | `"text"` | `"text"` → `body` is a string; `"json"` → parsed object. |
 | `timeoutMs` | `30000` | Aborts via AbortController. |
 
 **Why this works where n8n HTTP node doesn't:** the request leaves the container as **real Chrome traffic** (Chrome handles the TLS handshake, HTTP/2 framing, header ordering). Cloudflare sees the same fingerprint that received the cookie, so it lets the request through.
+
+> **Cross-origin: use `credentials: "omit"` for token-gated APIs.** The fetch runs inside the page, so it obeys CORS. The default `"include"` makes it a credentialed request, and the browser then refuses any response that does not carry `Access-Control-Allow-Credentials: true` — which most token-gated APIs do not send. All you get back is `Failed to fetch`, with no reason attached. If the API authenticates by header rather than by cookie (a bearer, an API key), send `"omit"`. Keep `"include"` for the same-origin Cloudflare case it was built for, where the cookie *is* the authentication.
 
 ### Example: Cloudflare Challenge — auto strategy
 
@@ -445,7 +464,23 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 - **Initial TTL**: Set when the session is created. Default is 30 seconds.
 - **Session Extension**: Every request to an existing `sessionId` resets the timer using the session's current `ttl`.
 - **Updating TTL**: You can update the `ttl` for an existing session by providing a new `ttl` value in any `/execute` request.
-- **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it calls `browser.close()` explicitly, releasing all resources.
+- **Explicit Cleanup**: When the worker's internal `ttl` timer expires, it closes the session's context and returns its browser to the pool.
+
+> **The 30-second default is an *idle* timeout, not a budget.** The timer resets on every `/execute`, so a run that keeps calling survives indefinitely. It also means a session dies during any gap longer than 30 seconds — a slow login, a pause between pages, a caller doing its own work in between. Long runs should pass a generous `ttl` explicitly (`"ttl": 300000`) rather than trusting the default.
+
+### Concurrency
+
+`MAX_SESSIONS` (default 5) caps how many sessions can exist at once. Over the cap, creating a new one gets `429` with a `Retry-After` header. Reusing an existing `sessionId` is never capped — a long run cannot get a 429 halfway through because someone else started a session.
+
+### Browser pooling
+
+Sessions are browser **contexts**, not browsers. Every session whose launch config matches — same `headless`, same `disableSecurity`, same `proxy` — shares one Chrome. A run that logs into many accounts in sequence pays for one launch instead of one per account, and contexts still give full isolation: separate cookie jar, storage, and cache.
+
+A browser with no sessions left is closed after `BROWSER_IDLE_MS` (default 60 s) rather than immediately, because a sequential run closes each session just before opening the next.
+
+### Shutdown
+
+On `SIGTERM` or `SIGINT` the worker stops accepting requests, waits up to `SHUTDOWN_GRACE_MS` (default 15 s) for in-flight steps, then closes every session and browser. A second signal exits at once. Keep the container's `stop_grace_period` above `SHUTDOWN_GRACE_MS` — both compose files set 30 s.
 
 ---
 
@@ -474,10 +509,103 @@ The `ttl` (Time-To-Live) parameter controls how long a session stays active in t
 | `getCookies` | — | `{ cookies }` |
 | `setCookies` | `{ cookies }` | `{ set }` |
 | `getLocalStorage` | `{ key }` | `{ value }` |
+| `getStorageState` | `{ indexedDB? }` | `{ storageState }` |
+| `getSessionStorage` | — | `{ value }` |
+| `setSessionStorage` | `{ value }` | `{ set }` |
+| `captureRequests` | `{ urlPattern, method?, max? }` | `{ armed, method, max }` |
+| `getCapturedRequests` | — | `{ requests }` |
 | `solveCaptcha` | `{ type, siteKey?, action?, cdata?, score?, url?, inject? }` | `{ solved, type, provider, elapsedMs, tokenLength, token }` |
 | `httpRequest` | `{ url, method?, headers?, body?, credentials?, responseType?, timeoutMs? }` | `{ status, ok, statusText, headers, body, finalUrl }` |
 
 > **Shadow DOM.** Selector-based actions (`click`, `fill`, `getText`, `getAttribute`, …) already reach into shadow roots: Playwright pierces **open** roots and patchright additionally pierces **closed** ones at the driver level — no extra option needed. `getContent` is the exception: `page.content()` does not serialize shadow trees, so pass `{ "shadow": true }` to inline every **open** shadow root as declarative shadow DOM (`<template shadowrootmode="open">…</template>`). Closed roots are invisible to page-side serialization and are omitted.
+
+### Capturing request headers — `captureRequests` / `getCapturedRequests`
+
+Some APIs are gated by headers the page computes at runtime — a bearer token plus a context header, for example. Those headers exist nowhere you can read: `getCookies` and `getLocalStorage` do not see them. The only copy is on the request the page itself sends, so you listen for it.
+
+Arm the listener **before** the navigation that triggers the request, then read what it caught:
+
+```jsonc
+{
+  "ttl": 300000,
+  "steps": [
+    { "action": "captureRequests", "params": {
+        "urlPattern": "api\\.example\\.com/v1/conversations",
+        "method": "GET",
+        "max": 5
+    }},
+    { "action": "goto", "params": { "url": "https://app.example.com/login" } },
+    { "action": "fill", "params": { "selector": "input[type=text]", "value": "user@example.com" } },
+    { "action": "fill", "params": { "selector": "input[type=password]", "value": "…" } },
+    { "action": "click", "params": { "selector": "button[type=submit]" } },
+    { "action": "goto", "params": { "url": "https://app.example.com/conversations" } },
+    { "action": "wait", "params": { "ms": 4000 } },
+    { "action": "getCapturedRequests" }
+  ]
+}
+```
+
+```jsonc
+// getCapturedRequests result
+{ "requests": [
+    { "url": "https://api.example.com/v1/conversations?per_page=10",
+      "method": "GET",
+      "headers": { "authorization": "Bearer …", "accept": "application/json", "referer": "…", … } }
+]}
+```
+
+Steps run in order after the session is created, so `captureRequests` as the first step is always armed before anything navigates.
+
+- **`urlPattern`** is a regex **source string**, not a glob, tested against the full URL. Escape your dots. An invalid pattern fails the step instead of silently matching nothing.
+- **`method`** is optional and compared case-insensitively; omit it to accept any method.
+- **`max`** (default 10) caps the buffer so a chatty page cannot grow it without bound.
+- Header keys are lowercased. Note that `user-agent` and `referer` cannot be set back on a `fetch()` — the browser controls them — so a replay through `httpRequest` sends the browser's own, which is what you want anyway.
+- `getCapturedRequests` does not drain the buffer; read it as often as you like.
+- Calling `captureRequests` again replaces the matcher and clears the buffer. Use that when a second endpoint needs its own header set — some APIs scope header sets per endpoint, and headers captured on one view get rejected on another.
+
+### Reusing a login — `storageState`
+
+Sessions die with the process, so a redeploy or a crash means logging in again. Where a site punishes repeat logins, export the state after logging in once and hand it back on the next session.
+
+```jsonc
+// export
+{ "sessionId": "…", "steps": [ { "action": "getStorageState" } ] }
+// → { "storageState": { "cookies": [...], "origins": [...] } }
+
+// restore — a session-creation field, not a step
+{ "storageState": { "cookies": [], "origins": [] },
+  "steps": [ { "action": "goto", "params": { "url": "https://app.example.com/conversations" } } ] }
+```
+
+Restoring only works at context creation, which is where Playwright accepts it — that is why it is a body field rather than an action. Sent alongside an existing `sessionId` it is ignored, and the worker logs that it was.
+
+Pass `{ "indexedDB": true }` to `getStorageState` to include IndexedDB.
+
+#### `sessionStorage` is not in `storageState`
+
+Playwright never serializes `sessionStorage`, and plenty of SPAs keep their access token exactly there — in which case `storageState` alone restores cookies and localStorage and still lands you on the login page. Export the other half separately and put it back:
+
+```jsonc
+// export — both halves, after you are logged in
+{ "sessionId": "…", "steps": [
+  { "action": "getStorageState" },
+  { "action": "getSessionStorage" }
+]}
+
+// restore — storageState at creation, sessionStorage once you are on the origin
+{ "storageState": { "cookies": [], "origins": [] },
+  "steps": [
+    { "action": "goto", "params": { "url": "https://app.example.com/login" } },
+    { "action": "setSessionStorage", "params": { "value": { "app-token": "…" } } },
+    { "action": "goto", "params": { "url": "https://app.example.com/conversations" } }
+  ]}
+```
+
+Storage is per-origin, so `setSessionStorage` has to run **after** a navigation to that origin — landing on the login page first is fine, the SPA redirects itself once the token is there.
+
+Note that `addJS` is the wrong tool for this. It injects an inline `<script>`, which a site's Content-Security-Policy will refuse — silently, with no error anywhere. Use these actions.
+
+The worker does not store any of this. Keep it wherever you keep the credentials it came from.
 
 ### GET /sessions
 List all active sessions with their current URLs and stored TTL values.
@@ -511,6 +639,12 @@ Basic health check showing the number of active sessions.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | Server port |
+| `WORKER_TOKEN` | — | Shared secret for every endpoint except `/health`. Blank means no authentication — see [Authentication](#authentication). |
+| `MAX_SESSIONS` | `5` | Max concurrent sessions. Over the cap, `/execute` returns `429`. |
+| `BROWSER_IDLE_MS` | `60000` | How long a pooled browser with no sessions stays alive before closing. |
+| `SHUTDOWN_GRACE_MS` | `15000` | How long `SIGTERM` waits for in-flight steps before tearing down. |
+| `MEM_LIMIT` | `6g` / `3g` | Container memory limit (compose only). `docker-compose.yml` defaults to `6g`, `docker-compose.slim.yml` to `3g`. |
+| `SHM_SIZE` | `2gb` / `1gb` | Container `/dev/shm` size (compose only). Same split as `MEM_LIMIT`. |
 | `CAPTCHA_PROVIDER` | `2captcha` | Default solver when `captchaSolver` is not passed in body. `2captcha` or `capsolver`. |
 | `CAPTCHA_API_KEY_2CAPTCHA` | — | API key used when provider is `2captcha`. |
 | `CAPTCHA_API_KEY_CAPSOLVER` | — | API key used when provider is `capsolver`. |
@@ -520,6 +654,25 @@ Basic health check showing the number of active sessions.
 | `PROXY_USERNAME` | — | Default proxy username. |
 | `PROXY_PASSWORD` | — | Default proxy password. |
 | `PROXY_BYPASS` | — | Default proxy bypass list, comma-separated. |
+
+## Deployment
+
+Two compose files, both standalone:
+
+| File | Contents | Use for |
+|------|----------|---------|
+| `docker-compose.yml` | worker + FlareSolverr, `6g` / `2gb` | local development, and hosts with the headroom |
+| `docker-compose.slim.yml` | worker only, `3g` / `1gb`, healthcheck | small boxes, and any site with no Cloudflare challenge |
+
+```bash
+docker compose -f docker-compose.slim.yml up -d
+```
+
+FlareSolverr only earns its memory against Cloudflare-challenged sites; the slim file drops it entirely. Both accept `MEM_LIMIT` and `SHM_SIZE` overrides — `shm_size` in particular can claim half of a 4 GB box on its own.
+
+**x86 only.** The Dockerfile installs `google-chrome-stable_current_amd64.deb` and both compose files pin `platform: linux/amd64`. Do not provision an ARM host for this.
+
+For an always-on deployment: set `WORKER_TOKEN`, and keep the port off the public internet as well. The two are not redundant — the failure mode is somebody else's captcha bill and an SSRF pivot through your proxy.
 
 ## Diagrams
 
