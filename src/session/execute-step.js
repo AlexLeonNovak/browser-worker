@@ -13,16 +13,23 @@ export async function executeStep(session, step) {
 
   switch (action) {
     case 'goto': {
+      let targetUrl;
       try {
-        const targetUrl = new URL(params.url);
-        // Auto-detect: if URL uses http://, add hostname to forceHttpHosts
-        if (targetUrl.protocol === 'http:') {
-          session.forceHttpHosts.add(targetUrl.hostname.toLowerCase());
-        }
-        await setupRoutes(session);
-      } catch (e) {
-        return { error: `Invalid URL: ${params.url}` };
+        targetUrl = new URL(params.url);
+      } catch {
+        // Throw rather than return an { error } object: the runner marks a step
+        // failed only when it throws (routes/execute.js), so a returned error
+        // reads as ok:true, slips past stopOnError, and the remaining steps run
+        // against about:blank.
+        throw new Error(`Invalid URL: ${params.url}`);
       }
+      // Auto-detect: if URL uses http://, add hostname to forceHttpHosts
+      if (targetUrl.protocol === 'http:') {
+        session.forceHttpHosts.add(targetUrl.hostname.toLowerCase());
+      }
+      // Deliberately outside the try above: a route-interception failure is not a
+      // bad URL, and it must surface as a failed step rather than be relabelled.
+      await setupRoutes(session);
       await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
       return { url: page.url() };
     }
