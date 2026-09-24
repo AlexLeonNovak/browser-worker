@@ -6,10 +6,12 @@ import registerExecuteRoute from './routes/execute.js';
 import registerSessionRoutes from './routes/sessions.js';
 
 const app = express();
+// Auth first: it reads only headers, so an unauthenticated caller gets a 401
+// before the worker buffers and parses up to MAX_BODY of JSON.
+app.use(createAuthMiddleware());
 // Express defaults to 100 kb, which a real HTML document for setContent (or a
 // large storageState) exceeds — the request would 413 before reaching a step.
 app.use(express.json({ limit: process.env.MAX_BODY || '5mb' }));
-app.use(createAuthMiddleware());
 
 registerExecuteRoute(app);
 registerSessionRoutes(app);
