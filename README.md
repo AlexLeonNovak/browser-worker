@@ -489,6 +489,7 @@ On `SIGTERM` or `SIGINT` the worker stops accepting requests, waits up to `SHUTD
 | Action | Params | Result |
 |--------|--------|--------|
 | `goto` | `{ url, waitUntil?, timeout? }` | `{ url }` |
+| `setContent` | `{ html, waitUntil?, timeout? }` | `{ bytes }` |
 | `reload` | `{ waitUntil? }` | `{ url }` |
 | `getUrl` | — | `{ url }` |
 | `getContent` | `{ shadow? }` | `{ html }` |
@@ -518,6 +519,29 @@ On `SIGTERM` or `SIGINT` the worker stops accepting requests, waits up to `SHUTD
 | `httpRequest` | `{ url, method?, headers?, body?, credentials?, responseType?, timeoutMs? }` | `{ status, ok, statusText, headers, body, finalUrl }` |
 
 > **Shadow DOM.** Selector-based actions (`click`, `fill`, `getText`, `getAttribute`, …) already reach into shadow roots: Playwright pierces **open** roots and patchright additionally pierces **closed** ones at the driver level — no extra option needed. `getContent` is the exception: `page.content()` does not serialize shadow trees, so pass `{ "shadow": true }` to inline every **open** shadow root as declarative shadow DOM (`<template shadowrootmode="open">…</template>`). Closed roots are invisible to page-side serialization and are omitted.
+
+### Rendering HTML you already hold — `setContent`
+
+Loads a raw HTML string into the session's page, so you can screenshot (or query) markup you have without hosting it at a URL. It maps to Playwright's `page.setContent(html, { waitUntil, timeout })`.
+
+```json
+{
+  "steps": [
+    { "action": "setViewportSize", "params": { "width": 800, "height": 600 } },
+    { "action": "setContent", "params": { "html": "<html><body><h1>Hello</h1><img src=\"https://example.com/logo.png\"></body></html>", "waitUntil": "networkidle" } },
+    { "action": "screenshot", "params": { "fullPage": true } }
+  ]
+}
+```
+
+- `html` is required. A missing or non-string `html` fails the step (and stops the run under `stopOnError`).
+- `waitUntil` defaults to `load`; one of `load`, `domcontentloaded`, `networkidle`, `commit`. `load` waits for the images in the HTML; use `networkidle` when fonts come from an external stylesheet or content loads after `onload`. `timeout` defaults to `30000` ms.
+- `result.bytes` is the UTF-8 size of the HTML that was loaded.
+- Subresources go through the session's `blockAds` / `forceHttp` routing and its proxy, even when `setContent` is the first step.
+- Each `setContent` starts from a blank page (`about:blank`), so nothing from an earlier `goto` or `setContent` (pending loads, timers, DOM) leaks into the render. Relative URLs therefore do not resolve: use absolute URLs or a `<base href>`.
+- `addCSS` / `addJS` do not apply to the loaded content. Put styles and scripts in the HTML itself.
+- The viewport is 1920×1080 by default. `setViewportSize` changes it: actions not in the table above fall through to the Playwright page method of the same name, called with `params` as its argument. `deviceScaleFactor` is fixed at 1.
+- The whole request body is capped by `MAX_BODY` (default `5mb`). Raise it for large documents, e.g. ones with inline base64 images.
 
 ### Capturing request headers — `captureRequests` / `getCapturedRequests`
 
@@ -641,6 +665,7 @@ Basic health check showing the number of active sessions.
 | `PORT` | `3001` | Server port |
 | `WORKER_TOKEN` | — | Shared secret for every endpoint except `/health`. Blank means no authentication — see [Authentication](#authentication). |
 | `MAX_SESSIONS` | `5` | Max concurrent sessions. Over the cap, `/execute` returns `429`. |
+| `MAX_BODY` | `5mb` | Max request body size (`express.json` limit). Oversized requests get `413`. |
 | `BROWSER_IDLE_MS` | `60000` | How long a pooled browser with no sessions stays alive before closing. |
 | `SHUTDOWN_GRACE_MS` | `15000` | How long `SIGTERM` waits for in-flight steps before tearing down. |
 | `MEM_LIMIT` | `6g` / `3g` | Container memory limit (compose only). `docker-compose.yml` defaults to `6g`, `docker-compose.slim.yml` to `3g`. |

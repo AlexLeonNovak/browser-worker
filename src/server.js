@@ -6,7 +6,9 @@ import registerExecuteRoute from './routes/execute.js';
 import registerSessionRoutes from './routes/sessions.js';
 
 const app = express();
-app.use(express.json());
+// Express defaults to 100 kb, which a real HTML document for setContent (or a
+// large storageState) exceeds — the request would 413 before reaching a step.
+app.use(express.json({ limit: process.env.MAX_BODY || '5mb' }));
 app.use(createAuthMiddleware());
 
 registerExecuteRoute(app);
@@ -27,6 +29,7 @@ const server = app.listen(PORT, () => {
   }
   console.log(`[env] WORKER_TOKEN=${mask(process.env.WORKER_TOKEN)}`);
   console.log(`[env] MAX_SESSIONS=${process.env.MAX_SESSIONS || '5 (default)'}`);
+  console.log(`[env] MAX_BODY=${process.env.MAX_BODY || '5mb (default)'}`);
   console.log(`[env] BROWSER_IDLE_MS=${process.env.BROWSER_IDLE_MS || '60000 (default)'}`);
   console.log(`[env] PROXY_SERVER=${process.env.PROXY_SERVER || '—'}`);
   console.log(`[env] PROXY_USERNAME=${process.env.PROXY_USERNAME ? '(set)' : '—'}`);
