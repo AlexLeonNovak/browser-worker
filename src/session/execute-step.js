@@ -33,6 +33,19 @@ export async function executeStep(session, step) {
       await page.goto(params.url, { waitUntil: params.waitUntil ?? 'domcontentloaded', timeout: params.timeout ?? 3600000 });
       return { url: page.url() };
     }
+    case 'setContent': {
+      // Throw, not return { error } — same reason as goto above.
+      if (typeof params.html !== 'string') throw new Error('setContent: html must be a string');
+      // Subresources (images, fonts) must go through blockAds / forceHttp even
+      // when this is the session's first step and no goto has set routes up.
+      await setupRoutes(session);
+      // setContent writes into the current document, so start from a fresh one:
+      // otherwise a previous page's pending loads hold "load" back until timeout,
+      // and its timers and fetches keep running and mutating the new DOM.
+      await page.goto('about:blank');
+      await page.setContent(params.html, { waitUntil: params.waitUntil ?? 'load', timeout: params.timeout ?? 30000 });
+      return { bytes: Buffer.byteLength(params.html) };
+    }
     case 'reload':
       await page.reload({ waitUntil: params.waitUntil ?? 'domcontentloaded' });
       return { url: page.url() };
