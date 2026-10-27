@@ -2,6 +2,7 @@ import express from 'express';
 import { sessions, closeAllSessions } from './session/manager.js';
 import { closeAllBrowsers, poolSize } from './session/browser-pool.js';
 import { createAuthMiddleware } from './auth.js';
+import { processStats } from './process-stats.js';
 import registerExecuteRoute from './routes/execute.js';
 import registerSessionRoutes from './routes/sessions.js';
 
@@ -44,7 +45,9 @@ const server = app.listen(PORT, () => {
 });
 
 const heartbeat = setInterval(() => {
-  console.log(`[PROCESS] alive sessions=${sessions.size} browsers=${poolSize()} uptime=${Math.round(process.uptime())}s`);
+  const ps = processStats();
+  const procs = ps ? ` procs=${ps.procs} zombies=${ps.zombies}` : '';
+  console.log(`[PROCESS] alive sessions=${sessions.size} browsers=${poolSize()}${procs} uptime=${Math.round(process.uptime())}s`);
 }, 60000);
 
 process.on('uncaughtException', (err) => {
