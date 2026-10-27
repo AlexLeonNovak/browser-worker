@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     wget ca-certificates \
     xvfb dbus-x11 \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Official Google Chrome stable — installs to /opt/google/chrome/chrome,
@@ -28,4 +29,8 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 3001
 
-ENTRYPOINT ["/entrypoint.sh"]
+# tini as PID 1 reaps orphans. Chrome's helpers (chrome, chrome_crashpad) get
+# re-parented to PID 1 when a browser closes, and node never waits on them:
+# 68 zombies after 17h, and after 32 days the pids limit was hit and nothing
+# could fork. Baked into the image so it holds however the container is run.
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
