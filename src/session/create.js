@@ -3,13 +3,14 @@ import { DEFAULT_USER_AGENT } from '../captcha/index.js';
 import { turnstileInterceptInit } from '../captcha/turnstile-intercept.js';
 import { sessions, resetTimer } from './manager.js';
 import { browserKey, acquireBrowser, releaseBrowser } from './browser-pool.js';
+import { summarize, safeUrl } from '../log-redact.js';
 
 /**
  * Takes a browser from the pool, opens a context + page for a new session and
  * registers it in the map.
  */
 export async function createSession(options = {}) {
-  console.log('Creating new session with options:', options);
+  console.log('Creating new session with options:', summarize(options));
   const {
     ttl = 30000,
     headless = true,
@@ -49,7 +50,7 @@ export async function createSession(options = {}) {
 
   // The proxy is a launch option, and part of the pool key — see browser-pool.js.
   const key = browserKey({ headless, disableSecurity, proxy });
-  console.log(`[session:${sessionId}] Acquiring Google Chrome (headless=${headless}, proxy=${proxy ? proxy.server : 'none'})...`);
+  console.log(`[session:${sessionId}] Acquiring Google Chrome (headless=${headless}, proxy=${proxy ? safeUrl(proxy.server) : 'none'})...`);
   const browser = await acquireBrowser(key, {
     headless,
     channel: 'chrome',
