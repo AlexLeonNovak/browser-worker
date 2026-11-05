@@ -3,6 +3,7 @@ import { resolveProxyConfig } from '../proxy.js';
 import { sessions, resetTimer } from '../session/manager.js';
 import { createSession } from '../session/create.js';
 import { executeStep } from '../session/execute-step.js';
+import { summarize, scrub } from '../log-redact.js';
 
 const VALID_PROVIDERS = ['2captcha', 'capsolver', 'anti-captcha', 'flaresolverr'];
 
@@ -88,12 +89,12 @@ export default function registerExecuteRoute(app) {
     for (const step of steps) {
       session.busy = true;
       try {
-        console.log(`[session:${session.sessionId}] action: ${step.action}`, step.params);
+        console.log(`[session:${session.sessionId}] action: ${step.action}`, summarize(step.params));
         const result = await executeStep(session, step);
-        console.log(`[session:${session.sessionId}] result: ${step.action}`, result);
+        console.log(`[session:${session.sessionId}] result: ${step.action}`, summarize(result));
         results.push({ action: step.action, ok: true, result });
       } catch (e) {
-        console.log(`[session:${session.sessionId}] error: ${step.action} — ${e.message}`);
+        console.log(`[session:${session.sessionId}] error: ${step.action} — ${scrub(e.message, step.params)}`);
         results.push({ action: step.action, ok: false, error: e.message });
         error = e.message;
         if (stopOnError) break;

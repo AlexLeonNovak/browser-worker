@@ -1,3 +1,5 @@
+import { safeUrl } from '../log-redact.js';
+
 /**
  * `httpRequest` action — runs fetch() inside the page so the request carries
  * the browser's real TLS / HTTP-2 fingerprint and the full cookie jar. This is
@@ -50,7 +52,7 @@ export async function httpRequestAction(session, params) {
     if (!hasCT) finalHeaders['Content-Type'] = 'application/json';
   }
 
-  console.log(`[session:${session.sessionId}] httpRequest ${method} ${url}`);
+  console.log(`[session:${session.sessionId}] httpRequest ${method} ${safeUrl(url)}`);
   const t0 = Date.now();
 
   const result = await page.evaluate(async (args) => {
@@ -97,6 +99,6 @@ export async function httpRequestAction(session, params) {
     throw new Error(`httpRequest failed: ${result.__error}${corsHint}`);
   }
 
-  console.log(`[session:${session.sessionId}] httpRequest ${method} ${url} → ${result.status} in ${Date.now() - t0}ms`);
+  console.log(`[session:${session.sessionId}] httpRequest ${method} ${safeUrl(url)} → ${result.status} in ${Date.now() - t0}ms`);
   return result;
 }
